@@ -27,6 +27,7 @@ INCLUDE_PATHS = (
     "validate_remote.ps1",
     "validate_remote.bat",
     "videopipeline.py",
+    "scripts/common.ps1",
     "scripts/check.ps1",
     "scripts/check.sh",
     "wifi_pipeline",

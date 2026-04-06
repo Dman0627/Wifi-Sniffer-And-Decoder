@@ -3,9 +3,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
-if (-not $NoCompile) {
-    python -m compileall -q wifi_pipeline
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
+    $PythonExe = "python"
 }
 
-python -m pytest -q
+if (-not $NoCompile) {
+    & $PythonExe -m compileall -q (Join-Path $RepoRoot "wifi_pipeline")
+}
+
+Push-Location $RepoRoot
+try {
+    & $PythonExe -m pytest -q
+}
+finally {
+    Pop-Location
+}

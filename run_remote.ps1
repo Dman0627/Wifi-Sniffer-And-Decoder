@@ -1,98 +1,81 @@
+<#
+.SYNOPSIS
+Runs the supported Windows-to-remote capture flow.
+
+.DESCRIPTION
+This helper wraps `videopipeline.py start-remote` and can optionally install
+dependencies, bootstrap the remote appliance, and run doctor first.
+
+.EXAMPLE
+.\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
+
+.EXAMPLE
+.\run_remote.ps1 -InstallDeps -Host pi@raspberrypi -Interface wlan0 -Bootstrap
+#>
+
 [CmdletBinding()]
 param(
     [Alias("Host")]
     [string]$RemoteHost = "",
     [string]$Interface = "",
+    [ValidateRange(1, 86400)]
     [int]$Duration = 60,
     [ValidateSet("none", "extract", "detect", "analyze", "play", "all")]
     [string]$Run = "all",
     [string]$Config = "",
     [string]$Identity = "",
+    [ValidateRange(1, 65535)]
     [int]$Port = 22,
     [string]$Output = "",
     [switch]$Bootstrap,
-    [switch]$DoctorFirst
+    [switch]$DoctorFirst,
+    [switch]$InstallDeps
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ScriptPath = Join-Path $RepoRoot "videopipeline.py"
-$PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $PythonExe)) {
-    $PythonExe = "python"
-}
+. (Join-Path $RepoRoot "scripts\common.ps1")
 
-function Invoke-PipelineCommand {
-    param(
-        [string[]]$CommandArgs
-    )
+Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps
 
-    $argsList = @()
-    if ($Config) {
-        $argsList += @("--config", $Config)
-    }
-    $argsList += $CommandArgs
-
-    Write-Host ""
-    Write-Host ("> {0} {1} {2}" -f $PythonExe, $ScriptPath, ($argsList -join " "))
-    & $PythonExe $ScriptPath @argsList
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Command failed with exit code {0}" -f $LASTEXITCODE)
-    }
-}
-
-function Add-OptionalArgument {
-    param(
-        [System.Collections.Generic.List[string]]$List,
-        [string]$Name,
-        [string]$Value
-    )
-
-    if ($Value) {
-        $List.Add($Name)
-        $List.Add($Value)
-    }
+if (-not $RemoteHost -and -not $Config) {
+    Write-Host "No host was provided on the command line; saved config values will be used if available."
 }
 
 if ($DoctorFirst) {
     $doctorArgs = [System.Collections.Generic.List[string]]::new()
     $doctorArgs.Add("doctor")
-    Add-OptionalArgument -List $doctorArgs -Name "--host" -Value $RemoteHost
-    Add-OptionalArgument -List $doctorArgs -Name "--interface" -Value $Interface
-    Add-OptionalArgument -List $doctorArgs -Name "--identity" -Value $Identity
-    if ($Port -gt 0) {
-        $doctorArgs.Add("--port")
-        $doctorArgs.Add([string]$Port)
-    }
-    Invoke-PipelineCommand -CommandArgs $doctorArgs.ToArray()
+    Add-ArgumentPair -List $doctorArgs -Name "--host" -Value $RemoteHost
+    Add-ArgumentPair -List $doctorArgs -Name "--interface" -Value $Interface
+    Add-ArgumentPair -List $doctorArgs -Name "--identity" -Value $Identity
+    $doctorArgs.Add("--port")
+    $doctorArgs.Add([string]$Port)
+    Invoke-RepoPipeline -RepoRoot $RepoRoot -Config $Config -CommandArgs $doctorArgs.ToArray()
 }
 
 if ($Bootstrap) {
     $bootstrapArgs = [System.Collections.Generic.List[string]]::new()
     $bootstrapArgs.Add("bootstrap-remote")
-    Add-OptionalArgument -List $bootstrapArgs -Name "--host" -Value $RemoteHost
-    Add-OptionalArgument -List $bootstrapArgs -Name "--identity" -Value $Identity
-    if ($Port -gt 0) {
-        $bootstrapArgs.Add("--port")
-        $bootstrapArgs.Add([string]$Port)
-    }
-    Invoke-PipelineCommand -CommandArgs $bootstrapArgs.ToArray()
+    Add-ArgumentPair -List $bootstrapArgs -Name "--host" -Value $RemoteHost
+    Add-ArgumentPair -List $bootstrapArgs -Name "--identity" -Value $Identity
+    $bootstrapArgs.Add("--port")
+    $bootstrapArgs.Add([string]$Port)
+    Invoke-RepoPipeline -RepoRoot $RepoRoot -Config $Config -CommandArgs $bootstrapArgs.ToArray()
 }
 
 $startArgs = [System.Collections.Generic.List[string]]::new()
 $startArgs.Add("start-remote")
-Add-OptionalArgument -List $startArgs -Name "--host" -Value $RemoteHost
-Add-OptionalArgument -List $startArgs -Name "--interface" -Value $Interface
-Add-OptionalArgument -List $startArgs -Name "--identity" -Value $Identity
-Add-OptionalArgument -List $startArgs -Name "--output" -Value $Output
-if ($Port -gt 0) {
-    $startArgs.Add("--port")
-    $startArgs.Add([string]$Port)
-}
+Add-ArgumentPair -List $startArgs -Name "--host" -Value $RemoteHost
+Add-ArgumentPair -List $startArgs -Name "--interface" -Value $Interface
+Add-ArgumentPair -List $startArgs -Name "--identity" -Value $Identity
+Add-ArgumentPair -List $startArgs -Name "--output" -Value $Output
+$startArgs.Add("--port")
+$startArgs.Add([string]$Port)
 $startArgs.Add("--duration")
 $startArgs.Add([string]$Duration)
 $startArgs.Add("--run")
 $startArgs.Add($Run)
 
-Invoke-PipelineCommand -CommandArgs $startArgs.ToArray()
+Invoke-RepoPipeline -RepoRoot $RepoRoot -Config $Config -CommandArgs $startArgs.ToArray()

@@ -39,6 +39,23 @@ What this means in practice:
 - Local Windows capture still exists, but it is no longer the primary product path
 - Windows monitor-mode and Wi-Fi lab helpers are best-effort, not the main promise of the repo
 
+## Start here
+
+If you just want the supported path with the least friction, use this sequence from Windows:
+
+```powershell
+.\setup_remote.ps1 -InstallDeps
+.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
+.\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
+```
+
+That gives you:
+
+- local dependency install
+- SSH pairing and remote bootstrap
+- a validation report
+- a repeatable day-to-day capture command
+
 ## Quickstart
 
 ### Windows
@@ -182,6 +199,14 @@ That service keeps state under `~/wifi-pipeline/state`, tracks the last complete
 .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -Bootstrap -DoctorFirst
 ```
 
+All three Windows helper scripts resolve the repo root automatically, so you can run them from any PowerShell working directory:
+
+| Script | Best use |
+|---|---|
+| `.\setup_remote.ps1` | First-run setup, pairing, bootstrap, and optional smoke test |
+| `.\validate_remote.ps1` | Supported-hardware validation and JSON report generation |
+| `.\run_remote.ps1` | Day-to-day remote capture and local processing |
+
 `validate_remote.ps1` is the Windows-first supported-hardware validation flow. It runs environment checks, doctor, captures a short smoke file by default, and writes a JSON report to `pipeline_output/validation_report.json`.
 
 ```powershell
@@ -268,8 +293,10 @@ Run the quick check script (syntax plus tests):
 ```
 
 ```bash
-./scripts/check.sh
+bash ./scripts/check.sh
 ```
+
+Both check scripts resolve the repo root automatically, so they work even if your shell is not already sitting in the repository root.
 
 ## Packaging and release
 
@@ -318,6 +345,16 @@ If you want the most reliable experience, stay on the supported product path:
 - `Windows 10/11` for control, import, analysis, and replay
 - `Raspberry Pi OS` or `Ubuntu` for remote capture
 - `pair-remote -> bootstrap-remote -> doctor -> start-remote`
+
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| `doctor` reports fallback privilege mode | Re-run `python .\videopipeline.py bootstrap-remote --host ...` with a remote account that has `sudo` |
+| SSH works but capture will not start | Verify the remote interface with `iw dev` on the Pi/Linux box, then rerun with `--interface wlan0` or the correct name |
+| `validate-remote` fails before capture | Run `python .\videopipeline.py doctor --host ... --interface ...` and fix the first failing check |
+| PowerShell blocks the helper scripts | Use `.\run_remote.bat`, `.\setup_remote.bat`, or `.\validate_remote.bat` |
+| You want the quickest sanity check | Run `.\scripts\check.ps1` on Windows or `bash ./scripts/check.sh` on Linux/macOS |
 
 ## Commands
 
@@ -369,5 +406,5 @@ Full 802.11 monitor capture depends on the adapter and driver. Windows drivers a
 ## Notes
 
 - The core analysis pipeline is cross platform, but the product is optimized around `Windows + Raspberry Pi OS/Ubuntu`.
-- Wi Fi lab helpers require external tools like aircrack ng and remain more fragile than the remote pcap-first path.
+- Wi-Fi lab helpers require external tools like `aircrack-ng` and remain more fragile than the remote pcap-first path.
 - Some reconstruction paths are heuristic and may require tuning in `lab.json`.

@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
 Write-Host "Setting up Wifi-Sniffer-And-Decoder for the supported Windows controller workflow..."
 Write-Host ""
@@ -19,6 +20,8 @@ Write-Host "  - Native Windows Python"
 Write-Host "  - Wireshark/NPcap tools on PATH"
 Write-Host "  - FFmpeg/ffplay on PATH"
 Write-Host "  - OpenSSH client for remote capture control"
+Write-Host ""
+Write-Host "The Windows helper scripts resolve the repo root automatically, so you can run them from any PowerShell location."
 Write-Host ""
 Write-Host "Explicit limits:"
 Write-Host "  - This repo does not make Windows monitor mode adapter-independent"
@@ -202,7 +205,9 @@ Write-Host ("  10. Run the supported hardware validation:")
 Write-Host ("     .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0")
 Write-Host ("  11. Use the Windows shortcut helper:")
 Write-Host ("     .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -Duration 60")
-Write-Host ("  12. Experimental local-only paths:")
+Write-Host ("  12. Run local checks:")
+Write-Host ("     .\scripts\check.ps1")
+Write-Host ("  13. Experimental local-only paths:")
 Write-Host ("     python .\videopipeline.py capture")
 Write-Host ("     python .\videopipeline.py extract --pcap .\pipeline_output\raw_capture.pcapng")
 Write-Host ("     python .\videopipeline.py all")

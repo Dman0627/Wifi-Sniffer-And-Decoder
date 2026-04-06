@@ -1,11 +1,28 @@
+<#
+.SYNOPSIS
+Validates the supported Windows + remote capture workflow.
+
+.DESCRIPTION
+This helper wraps `videopipeline.py validate-remote` and can optionally run the
+dependency installer first. By default it performs a short smoke capture.
+
+.EXAMPLE
+.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
+
+.EXAMPLE
+.\validate_remote.ps1 -InstallDeps -Host pi@raspberrypi -Interface wlan0 -SkipSmoke
+#>
+
 [CmdletBinding()]
 param(
     [Alias("Host")]
     [string]$RemoteHost = "",
     [string]$Interface = "",
+    [ValidateRange(1, 3600)]
     [int]$Duration = 15,
     [string]$Config = "",
     [string]$Identity = "",
+    [ValidateRange(1, 65535)]
     [int]$Port = 22,
     [string]$Dest = "",
     [string]$Report = "",
@@ -14,59 +31,26 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$InstallScript = Join-Path $RepoRoot "install_deps.ps1"
-$ScriptPath = Join-Path $RepoRoot "videopipeline.py"
-$PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+. (Join-Path $RepoRoot "scripts\common.ps1")
 
-if ($InstallDeps -or -not (Test-Path $PythonExe)) {
-    if (-not (Test-Path $InstallScript)) {
-        throw "install_deps.ps1 was not found."
-    }
-    Write-Host ""
-    Write-Host ("> powershell -ExecutionPolicy Bypass -File {0}" -f $InstallScript)
-    powershell -ExecutionPolicy Bypass -File $InstallScript
-    if ($LASTEXITCODE -ne 0) {
-        throw ("install_deps.ps1 failed with exit code {0}" -f $LASTEXITCODE)
-    }
-}
+Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps
 
-if (-not (Test-Path $PythonExe)) {
-    $PythonExe = "python"
-}
-
-$argsList = @()
-if ($Config) {
-    $argsList += @("--config", $Config)
-}
-$argsList += @("validate-remote")
-if ($RemoteHost) {
-    $argsList += @("--host", $RemoteHost)
-}
-if ($Interface) {
-    $argsList += @("--interface", $Interface)
-}
-if ($Identity) {
-    $argsList += @("--identity", $Identity)
-}
-if ($Dest) {
-    $argsList += @("--dest", $Dest)
-}
-if ($Report) {
-    $argsList += @("--report", $Report)
-}
-if ($Port -gt 0) {
-    $argsList += @("--port", [string]$Port)
-}
-if ($Duration -gt 0) {
-    $argsList += @("--duration", [string]$Duration)
-}
+$argsList = [System.Collections.Generic.List[string]]::new()
+$argsList.Add("validate-remote")
+Add-ArgumentPair -List $argsList -Name "--host" -Value $RemoteHost
+Add-ArgumentPair -List $argsList -Name "--interface" -Value $Interface
+Add-ArgumentPair -List $argsList -Name "--identity" -Value $Identity
+Add-ArgumentPair -List $argsList -Name "--dest" -Value $Dest
+Add-ArgumentPair -List $argsList -Name "--report" -Value $Report
+$argsList.Add("--port")
+$argsList.Add([string]$Port)
+$argsList.Add("--duration")
+$argsList.Add([string]$Duration)
 if ($SkipSmoke) {
-    $argsList += "--skip-smoke"
+    $argsList.Add("--skip-smoke")
 }
 
-Write-Host ""
-Write-Host ("> {0} {1} {2}" -f $PythonExe, $ScriptPath, ($argsList -join " "))
-& $PythonExe $ScriptPath @argsList
-exit $LASTEXITCODE
+Invoke-RepoPipeline -RepoRoot $RepoRoot -Config $Config -CommandArgs $argsList.ToArray()

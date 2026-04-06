@@ -37,4 +37,5 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
         members = set(archive.namelist())
     assert "README.md" in members
     assert "videopipeline.py" in members
+    assert "scripts/common.ps1" in members
     assert "wifi_pipeline/cli.py" in members
