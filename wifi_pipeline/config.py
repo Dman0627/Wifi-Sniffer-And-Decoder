@@ -5,12 +5,16 @@ import os
 import sys
 from typing import Dict, Optional
 
-from .environment import IS_WINDOWS, pick_interface
+from .environment import IS_MACOS, IS_WINDOWS, pick_interface
 from .ui import ask, ask_int, confirm, ok, section, warn
 
 DEFAULT_CONFIG = {
     # ── environment ───────────────────────────────────────────────────────────
-    "environment_model": "native_windows" if sys.platform.startswith("win") else "linux",
+    "environment_model": (
+        "native_windows" if sys.platform.startswith("win")
+        else "macos" if sys.platform == "darwin"
+        else "linux"
+    ),
     # ── capture ───────────────────────────────────────────────────────────────
     "interface": "",
     "target_macs": [],
@@ -22,7 +26,7 @@ DEFAULT_CONFIG = {
     "ap_channel": 6,
     "wpa_password": "",
     "wpa_password_env": "WIFI_PIPELINE_WPA_PASSWORD",
-    # ── piracy pipeline (monitor mode + cracking) ─────────────────────────────
+    # ── wi-fi lab pipeline (monitor mode + cracking) ─────────────────────────────
     "wordlist_path": "/usr/share/wordlists/rockyou.txt",
     "handshake_timeout": 120,
     "crack_timeout": 600,
@@ -56,12 +60,15 @@ def load_config(path: Optional[str] = None) -> Dict[str, object]:
             config.update(json.load(handle))
         ok(f"Config loaded from {selected_path}")
 
-    # Only force native_windows on Windows — allow linux/kali on Linux so
-    # the monitor-mode pipeline is not blocked.
+    # Correct environment_model for the actual running platform so that
+    # platform-specific tool lists and capture paths are always consistent.
     if IS_WINDOWS and config.get("environment_model") != "native_windows":
         warn("Overriding environment_model with native_windows on this platform.")
         config["environment_model"] = "native_windows"
-    elif not IS_WINDOWS and config.get("environment_model") == "native_windows":
+    elif IS_MACOS and config.get("environment_model") not in ("macos", "linux"):
+        warn("Overriding environment_model with macos on this platform.")
+        config["environment_model"] = "macos"
+    elif not IS_WINDOWS and not IS_MACOS and config.get("environment_model") == "native_windows":
         warn("Overriding environment_model with linux on this platform.")
         config["environment_model"] = "linux"
 
@@ -117,8 +124,8 @@ def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
     config["ap_bssid"] = ask("AP BSSID (MAC of access point)", str(config.get("ap_bssid") or ""))
     config["ap_channel"] = ask_int("AP channel", int(config.get("ap_channel", 6)))
 
-    # ── piracy pipeline ──────────────────────────────────────────────────────
-    section("Monitor Mode / WPA2 Cracking (piracy pipeline)")
+    # ── wi-fi lab pipeline ───────────────────────────────────────────────────
+    section("Monitor Mode / WPA2 Cracking (wi-fi lab pipeline)")
     config["monitor_method"] = ask(
         "Handshake capture method (airodump/besside/tcpdump)",
         str(config.get("monitor_method") or "airodump"),

@@ -666,7 +666,7 @@ class StreamExtractor:
     def extract(self, pcap_path: str) -> Dict[str, object]:
         section("Stage 2 - Stream Extraction")
         if not HAS_SCAPY:
-            err("scapy is not installed. Run install_deps.ps1 first.")
+            err("scapy is not installed. Run: pip install scapy  (or pip3 on Linux/macOS, or install_deps.ps1 on Windows)")
             return {}
 
         source = Path(pcap_path)
@@ -722,7 +722,7 @@ class StreamExtractor:
             "generated_at": time.time(),
             "pcap_path": str(source.resolve()),
             "capture_interface": str(self.config.get("interface") or ""),
-            "environment_model": str(self.config.get("environment_model") or "native_windows"),
+            "environment_model": str(self.config.get("environment_model") or "unknown"),
             "filters": {
                 "protocol": str(self.config.get("protocol") or "udp"),
                 "video_port": int(self.config.get("video_port", 5004) or 5004),

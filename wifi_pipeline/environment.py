@@ -10,7 +10,8 @@ from typing import List, Optional, Tuple
 from .ui import BOLD, CYAN, DIM, RESET, ask, confirm, err, info, ok, section, warn
 
 IS_WINDOWS = sys.platform.startswith("win")
-IS_LINUX = sys.platform.startswith("linux")
+IS_LINUX   = sys.platform.startswith("linux")
+IS_MACOS   = sys.platform == "darwin"
 
 
 @dataclass
@@ -21,7 +22,7 @@ class ToolStatus:
     path: Optional[str]
 
 
-# Tools required/optional on Windows (original behaviour)
+# Tools required/optional on Windows
 WINDOWS_TOOLS = (
     ("dumpcap",      "Packet capture through NPcap/Wireshark",  True),
     ("tshark",       "Packet parsing and inspection",           True),
@@ -29,7 +30,7 @@ WINDOWS_TOOLS = (
     ("airdecap-ng",  "Optional Wi-Fi layer decryption",         False),
 )
 
-# Tools required/optional on Linux / Kali (piracy pipeline)
+# Tools required/optional on Linux / Kali
 LINUX_TOOLS = (
     ("airmon-ng",    "Enable/disable monitor mode",             True),
     ("airodump-ng",  "Targeted WPA2 handshake capture",         True),
@@ -44,7 +45,23 @@ LINUX_TOOLS = (
     ("ffplay",       "Optional playback preview",               False),
 )
 
-# Tools needed on both platforms
+# Tools required/optional on macOS
+# Install via: brew install aircrack-ng hashcat hcxtools wireshark
+# tcpdump ships with macOS and supports monitor mode via -I flag.
+MACOS_TOOLS = (
+    ("tcpdump",      "Raw capture + monitor mode (-I flag, built-in)", True),
+    ("dumpcap",      "Packet capture via Wireshark (brew --cask wireshark)", False),
+    ("tshark",       "Packet parsing (brew install wireshark)",        False),
+    ("aircrack-ng",  "WPA2 PSK dictionary crack (brew install aircrack-ng)", True),
+    ("airdecap-ng",  "Strip Wi-Fi layer from pcap (included with aircrack-ng)", True),
+    ("besside-ng",   "Automatic multi-AP handshake capture",           False),
+    ("hashcat",      "GPU-accelerated WPA2 crack (brew install hashcat)", False),
+    ("cap2hccapx",   "Convert .cap to hashcat format (brew install hcxtools)", False),
+    ("hcxpcapngtool","Alternative cap converter (brew install hcxtools)", False),
+    ("ffplay",       "Optional playback preview (brew install ffmpeg)", False),
+)
+
+# Tools needed on all platforms
 COMMON_TOOLS = (
     ("python3",      "Python interpreter",                      True),
 )
@@ -57,13 +74,13 @@ def is_admin() -> bool:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())
         except Exception:
             return False
-    # Linux: check for root
+    # Linux / macOS: check for root
     return os.geteuid() == 0
 
 
 def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
     if not IS_WINDOWS:
-        raise RuntimeError("UAC elevation helper is Windows-only; use sudo on Linux.")
+        raise RuntimeError("UAC elevation helper is Windows-only; use sudo on Linux/macOS.")
     import ctypes
     argv = list(sys.argv[1:] if argv is None else argv)
     script = os.path.abspath(sys.argv[0])
@@ -76,7 +93,12 @@ def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
 def check_environment() -> bool:
     section("Environment Check")
 
-    platform_tools = WINDOWS_TOOLS if IS_WINDOWS else LINUX_TOOLS
+    if IS_WINDOWS:
+        platform_tools = WINDOWS_TOOLS
+    elif IS_MACOS:
+        platform_tools = MACOS_TOOLS
+    else:
+        platform_tools = LINUX_TOOLS
     all_required = True
 
     for name, purpose, required in (*COMMON_TOOLS, *platform_tools):
@@ -103,7 +125,7 @@ def check_environment() -> bool:
         if IS_WINDOWS:
             warn("Administrator rights are recommended for capture and interface discovery.")
         else:
-            warn("Root (sudo) is required for monitor mode and raw socket capture on Linux.")
+            warn("Root (sudo) is required for monitor mode and raw socket capture on Linux/macOS.")
 
     return all_required
 
@@ -153,10 +175,46 @@ def _list_linux_interfaces() -> List[Tuple[str, str, str]]:
     return interfaces
 
 
+def _list_macos_interfaces() -> List[Tuple[str, str, str]]:
+    """List network interfaces on macOS using networksetup."""
+    interfaces: List[Tuple[str, str, str]] = []
+    try:
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        current_port = ""
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Hardware Port:"):
+                current_port = line.split(":", 1)[1].strip()
+            elif line.startswith("Device:") and current_port:
+                iface = line.split(":", 1)[1].strip()
+                if iface:
+                    interfaces.append((str(len(interfaces) + 1), iface, current_port))
+                current_port = ""
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    if not interfaces:
+        # Fallback: list all interfaces from ifconfig
+        try:
+            result = subprocess.run(
+                ["ifconfig", "-l"], capture_output=True, text=True, timeout=5, check=False,
+            )
+            for index, name in enumerate(result.stdout.split(), start=1):
+                interfaces.append((str(index), name, "network interface"))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    return interfaces
+
+
 def list_interfaces() -> List[Tuple[str, str, str]]:
+    if IS_MACOS:
+        return _list_macos_interfaces()
     if IS_LINUX:
         return _list_linux_interfaces()
-
     if not IS_WINDOWS:
         return []
 
@@ -211,6 +269,8 @@ def pick_interface(current: str) -> str:
         warn("Unable to enumerate interfaces automatically.")
         if IS_WINDOWS:
             print(f"  {BOLD}Tip:{RESET} install Wireshark/NPcap and re-run in an Administrator shell.")
+        elif IS_MACOS:
+            print(f"  {BOLD}Tip:{RESET} run as root (sudo) and ensure Xcode CLI tools are installed.")
         else:
             print(f"  {BOLD}Tip:{RESET} install iw ('sudo apt install iw') and re-run as root.")
         return ask("Capture interface", current or "")
@@ -231,9 +291,9 @@ def pick_interface(current: str) -> str:
 
 
 def maybe_elevate_for_capture(interactive: bool = True) -> bool:
-    if IS_LINUX:
+    if IS_LINUX or IS_MACOS:
         if not is_admin():
-            warn("Monitor mode and raw capture require root on Linux. Re-run with sudo.")
+            warn("Monitor mode and raw capture require root on Linux/macOS. Re-run with sudo.")
         return False   # Don't block — let the underlying tool produce the real error
     if not IS_WINDOWS:
         return False

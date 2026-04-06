@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import resolve_wpa_password
-from .environment import IS_WINDOWS, maybe_elevate_for_capture
+from .environment import IS_MACOS, IS_WINDOWS, maybe_elevate_for_capture
 from .ui import done, err, info, ok, section, warn
 
 
@@ -36,7 +36,7 @@ def _require(tool: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Monitor-mode helpers  (piracy pipeline — Linux / Kali)
+# Monitor-mode helpers  (wi-fi lab pipeline — Linux, macOS)
 # ---------------------------------------------------------------------------
 
 class MonitorMode:
@@ -65,7 +65,7 @@ class MonitorMode:
         if not airmon:
             return None
 
-        # Kill interfering processes first (same as piracy script)
+        # Kill interfering processes first
         _run(["airmon-ng", "check", "kill"])
 
         result = _run(["airmon-ng", "start", self.base_interface])
@@ -101,7 +101,7 @@ class MonitorMode:
 
 
 # ---------------------------------------------------------------------------
-# Handshake capture (piracy pipeline steps 3 & 4)
+# Handshake capture (wi-fi lab pipeline steps 3 & 4)
 # ---------------------------------------------------------------------------
 
 class HandshakeCapture:
@@ -109,7 +109,7 @@ class HandshakeCapture:
     Captures a WPA2 4-way handshake using either besside-ng (automatic,
     handles deauth itself) or airodump-ng (targeted, channel + BSSID).
 
-    This mirrors the piracy script's menu options {3} and {4}.
+    Targets the configured AP BSSID and channel.
     """
 
     def __init__(self, config: Dict[str, object], output_dir: Path) -> None:
@@ -119,7 +119,7 @@ class HandshakeCapture:
 
     def capture_besside(self, mon_interface: str) -> Optional[str]:
         """
-        Option {3} from piracy: besside-ng automatic handshake grabber.
+        besside-ng automatic handshake grabber.
         Targets only the configured BSSID/ESSID when provided, otherwise
         sweeps all reachable APs (lab use — make sure you own them all).
         """
@@ -153,7 +153,7 @@ class HandshakeCapture:
 
     def capture_airodump(self, mon_interface: str) -> Optional[str]:
         """
-        Option {4} from piracy: airodump-ng targeted capture.
+        airodump-ng targeted capture.
         Requires ap_bssid and ap_channel in config.
         """
         section("Handshake Capture — airodump-ng")
@@ -217,7 +217,7 @@ class HandshakeCapture:
 
 
 # ---------------------------------------------------------------------------
-# WPA2 cracking (piracy pipeline steps 5 & 6)
+# WPA2 cracking (wi-fi lab pipeline steps 5 & 6)
 # ---------------------------------------------------------------------------
 
 class WPACracker:
@@ -351,7 +351,7 @@ class WPACracker:
 
 
 # ---------------------------------------------------------------------------
-# Main Capture class (original + piracy pipeline integrated)
+# Main Capture class (wi-fi lab pipeline integrated)
 # ---------------------------------------------------------------------------
 
 class Capture:
@@ -389,15 +389,19 @@ class Capture:
     # ------------------------------------------------------------------
 
     def run(self, interactive: bool = True) -> Optional[str]:
+        """
+        Standard pcap capture using dumpcap (cross-platform: Windows, Linux, macOS).
+        Falls back to tcpdump when dumpcap is not available on Linux/macOS.
+        """
         section("Stage 1 - Capture")
-        if not IS_WINDOWS:
-            err("This capture workflow now targets native Windows only.")
-            return None
         if maybe_elevate_for_capture(interactive=interactive):
             return None
 
         dumpcap = shutil.which("dumpcap")
         if not dumpcap:
+            if not IS_WINDOWS:
+                info("dumpcap not found — falling back to tcpdump.")
+                return self._run_tcpdump_capture()
             err("dumpcap not found. Install Wireshark with NPcap and add it to PATH.")
             return None
 
@@ -432,16 +436,53 @@ class Capture:
         ok(f"Capture saved to {self.raw_capture}")
         return str(self.raw_capture)
 
-    # ------------------------------------------------------------------
-    # piracy pipeline: monitor mode + raw 802.11 capture (Linux/Kali)
-    # ------------------------------------------------------------------
+    def _run_tcpdump_capture(self) -> Optional[str]:
+        """
+        Fallback capture using tcpdump (Linux / macOS) when dumpcap is absent.
+        Writes a standard pcap to the same raw_capture path.
+        """
+        tcpdump = _require("tcpdump")
+        if not tcpdump:
+            err("Neither dumpcap nor tcpdump found. Install Wireshark or tcpdump.")
+            return None
+
+        interface = self._ensure_interface()
+        if not interface:
+            return None
+
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        capture_filter = self.build_capture_filter()
+        duration = int(self.config.get("capture_duration", 60) or 0)
+
+        cmd = ["tcpdump", "-i", interface, "-w", str(self.raw_capture)]
+        if capture_filter:
+            cmd.extend(["-f", capture_filter])
+        if duration > 0:
+            cmd.extend(["-G", str(duration), "-W", "1"])
+
+        info(f"Interface : {interface}")
+        info(f"Filter    : {capture_filter or '(none)'}")
+        info(f"Output    : {self.raw_capture}")
+        info(f"Duration  : {duration}s" if duration else "Duration  : manual stop (Ctrl-C)")
+
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=(duration + 5) if duration else None, check=False)
+        except subprocess.TimeoutExpired:
+            pass
+
+        if not self.raw_capture.exists() or self.raw_capture.stat().st_size == 0:
+            err("tcpdump finished without writing a pcap.")
+            return None
+
+        ok(f"Capture saved to {self.raw_capture}")
+        return str(self.raw_capture)
 
     def run_monitor(
         self,
         method: str = "airodump",   # "airodump" | "besside" | "tcpdump"
     ) -> Optional[str]:
         """
-        Full piracy-style pipeline:
+        Full wi-fi lab pipeline:
           1. Enable monitor mode  (airmon-ng)
           2. Capture raw 802.11 frames including frames from third-party clients
              that would be invisible to a normal Windows managed-mode capture.
@@ -455,8 +496,16 @@ class Capture:
         section("Stage 1 - Monitor-Mode Capture")
 
         if IS_WINDOWS:
-            err("Monitor-mode capture requires Linux/Kali. Use run() for Windows.")
+            err("Monitor-mode capture requires Linux/Kali or macOS. Use run() for Windows.")
             return None
+
+        if IS_MACOS:
+            # macOS: tcpdump -I puts the interface into monitor mode natively
+            interface = self._ensure_interface()
+            if not interface:
+                return None
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            return self._run_tcpdump_monitor_macos(interface)
 
         interface = self._ensure_interface()
         if not interface:
@@ -516,13 +565,41 @@ class Capture:
         err("tcpdump produced no output.")
         return None
 
+    def _run_tcpdump_monitor_macos(self, interface: str) -> Optional[str]:
+        """
+        macOS monitor-mode capture: tcpdump -I puts the adapter into monitor mode.
+        Requires root and a Wi-Fi interface (e.g. en0).
+        """
+        tcpdump = _require("tcpdump")
+        if not tcpdump:
+            return None
+
+        out = self.output_dir / "monitor_raw.pcap"
+        duration = int(self.config.get("capture_duration", 60) or 60)
+        cmd = ["tcpdump", "-I", "-i", interface, "-w", str(out)]
+        if duration > 0:
+            cmd.extend(["-G", str(duration), "-W", "1"])
+
+        info(f"tcpdump monitor mode (-I) on {interface} for {duration}s …")
+        try:
+            subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=duration + 5, check=False)
+        except subprocess.TimeoutExpired:
+            pass
+
+        if out.exists() and out.stat().st_size > 0:
+            ok(f"Monitor capture saved to {out}")
+            return str(out)
+        err("tcpdump -I produced no output. Ensure you are root and the interface supports monitor mode.")
+        return None
+
     def disable_monitor(self) -> None:
-        """Step {7} from piracy: put the card back into managed mode."""
+        """Put the card back into managed mode."""
         if self._monitor:
             self._monitor.disable()
 
     # ------------------------------------------------------------------
-    # WPA2 crack + airdecap pipeline (piracy steps 5/6 → airdecap-ng)
+    # WPA2 crack + airdecap pipeline (lab steps 5/6 → airdecap-ng)
     # ------------------------------------------------------------------
 
     def crack_and_decrypt(self, handshake_cap: Optional[str] = None) -> Optional[str]:
@@ -607,7 +684,7 @@ class Capture:
         return str(self.decrypted_capture)
 
     # ------------------------------------------------------------------
-    # Convenience: full end-to-end piracy pipeline in one call
+    # Convenience: full end-to-end wi-fi lab pipeline in one call
     # ------------------------------------------------------------------
 
     def run_full_wifi_pipeline(self, method: str = "airodump") -> Optional[str]:

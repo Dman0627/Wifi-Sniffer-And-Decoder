@@ -11,7 +11,7 @@ from .analysis import CryptoAnalyzer, FormatDetector, _load_manifest, _rank_cand
 from .capture import Capture
 from .config import interactive_config, load_config, resolve_wpa_password, save_config
 from .corpus import CorpusStore
-from .environment import IS_WINDOWS, check_environment
+from .environment import IS_MACOS, IS_WINDOWS, check_environment
 from .extract import StreamExtractor
 from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture
 from .ui import (
@@ -109,7 +109,7 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     interface = str(config.get("interface") or "").strip() or f"{RED}unset{RESET}"
     magic = str(config.get("custom_magic_hex") or "").strip() or f"{DIM}(none){RESET}"
     preferred = str(config.get("preferred_stream_id") or "").strip() or f"{DIM}(auto-pick){RESET}"
-    env_model = str(config.get("environment_model") or "native_windows")
+    env_model = str(config.get("environment_model") or ("native_windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux"))
 
     print(f"  {BOLD}Saved Config{RESET}")
     print(f"    Platform         : {env_model}")
@@ -352,7 +352,7 @@ def run_capture(config: Dict[str, object], strip_wifi: bool = False) -> Optional
 
 
 def run_monitor(config: Dict[str, object], method: Optional[str] = None) -> Optional[str]:
-    """Enable monitor mode and capture raw 802.11 frames (Linux/Kali only)."""
+    """Enable monitor mode and capture raw 802.11 frames (Linux/Kali and macOS)."""
     capture = Capture(config)
     chosen_method = method or str(config.get("monitor_method") or "airodump")
     return capture.run_monitor(method=chosen_method)
@@ -365,7 +365,7 @@ def run_crack_decrypt(config: Dict[str, object], handshake_cap: Optional[str] = 
 
 
 def run_wifi_pipeline(config: Dict[str, object], method: Optional[str] = None) -> Optional[str]:
-    """Full piracy pipeline: monitor → handshake → crack → airdecap-ng → returns decrypted pcap."""
+    """Full wi-fi lab pipeline: monitor → handshake → crack → airdecap-ng → returns decrypted pcap."""
     capture = Capture(config)
     chosen_method = method or str(config.get("monitor_method") or "airodump")
     return capture.run_full_wifi_pipeline(method=chosen_method)
@@ -450,27 +450,27 @@ def interactive_menu(config: Dict[str, object]) -> int:
         report = _load_report(config)
         has_candidate = bool(report and report.get("candidate_material"))
         options = [
-            "Guided setup / configure device",           # 0
-            "Capture traffic (Windows/dumpcap)",          # 1
-            "Monitor mode capture (Linux/Kali)",          # 2
-            "Crack WPA2 + decrypt pcap",                  # 3
-            "Strip Wi-Fi layer on an existing pcap",      # 4
-            "Extract payload streams from a pcap",        # 5
-            "Run payload detection",                      # 6
-            "Review candidate payloads",                  # 7
-            "Pin a preferred candidate stream",           # 8
-            "Edit custom stream hints",                   # 9
-            "Run cipher heuristics",                      # 10
-            "Start experimental replay / reconstruction", # 11
-            "Run full pipeline (Windows capture)",        # 12
-            "Run full Wi-Fi pipeline (Linux monitor+crack)", # 13
-            "Show latest report summary",                 # 14
-            "Show corpus archive",                        # 15
-            "Launch web dashboard",                       # 16
-            "Check environment",                          # 17
-            "Exit",                                       # 18
+            "Guided setup / configure device",                    # 0
+            "Capture traffic (dumpcap / tcpdump fallback)",       # 1
+            "Monitor mode capture (Linux / macOS)",               # 2
+            "Crack WPA2 + decrypt pcap",                          # 3
+            "Strip Wi-Fi layer on an existing pcap",              # 4
+            "Extract payload streams from a pcap",                # 5
+            "Run payload detection",                              # 6
+            "Review candidate payloads",                          # 7
+            "Pin a preferred candidate stream",                   # 8
+            "Edit custom stream hints",                           # 9
+            "Run cipher heuristics",                              # 10
+            "Start experimental replay / reconstruction",         # 11
+            "Run full pipeline (dumpcap / tcpdump capture)",      # 12
+            "Run full Wi-Fi pipeline (Linux/macOS monitor+crack)",# 13
+            "Show latest report summary",                         # 14
+            "Show corpus archive",                                # 15
+            "Launch web dashboard",                               # 16
+            "Check environment",                                  # 17
+            "Exit",                                               # 18
         ]
-        default = 11 if has_candidate else (2 if not IS_WINDOWS else 1)
+        default = 11 if has_candidate else (1 if IS_WINDOWS else 2)
         selection = choose("Select an action", options, default=default)
 
         if selection == 0:
@@ -545,12 +545,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("menu", help="Open the guided dashboard interface")
     subparsers.add_parser("config", help="Launch interactive configuration")
 
-    # ── Windows capture ──────────────────────────────────────────────────────
-    capture_p = subparsers.add_parser("capture", help="Capture traffic into a pcap (Windows/dumpcap)")
+    # ── Standard capture (all platforms) ─────────────────────────────────────
+    capture_p = subparsers.add_parser("capture", help="Capture traffic into a pcap (dumpcap, or tcpdump fallback)")
     capture_p.add_argument("--strip-wifi", action="store_true", help="Run airdecap-ng after capture")
 
-    # ── Linux monitor mode ───────────────────────────────────────────────────
-    monitor_p = subparsers.add_parser("monitor", help="Enable monitor mode and capture raw 802.11 frames (Linux/Kali)")
+    # ── Linux / macOS monitor mode ────────────────────────────────────────────
+    monitor_p = subparsers.add_parser("monitor", help="Enable monitor mode and capture raw 802.11 frames (Linux/Kali and macOS)")
     monitor_p.add_argument(
         "--method",
         default=None,
@@ -588,9 +588,9 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--port", default=DEFAULT_WEB_PORT, type=int)
     web_p.add_argument("--no-browser", action="store_true")
 
-    subparsers.add_parser("deps", help="Check the native environment (Windows or Linux)")
+    subparsers.add_parser("deps", help="Check the native environment (Windows, Linux, or macOS)")
 
-    all_p = subparsers.add_parser("all", help="Run capture/extract/detect/analyze in sequence (Windows)")
+    all_p = subparsers.add_parser("all", help="Run capture/extract/detect/analyze in sequence (all platforms)")
     all_p.add_argument("--pcap", required=False, help="Skip capture and use an existing pcap/pcapng file")
     all_p.add_argument("--decrypted", required=False, help="Directory containing decrypted reference units")
     all_p.add_argument("--strip-wifi", action="store_true", help="Run airdecap-ng before extraction")

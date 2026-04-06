@@ -18,7 +18,7 @@ from .analysis import CryptoAnalyzer, FormatDetector, _rank_candidate_streams
 from .capture import Capture
 from .config import DEFAULT_CONFIG
 from .corpus import CorpusStore
-from .environment import check_environment, list_interfaces
+from .environment import IS_MACOS, IS_WINDOWS, check_environment, list_interfaces
 from .extract import StreamExtractor
 from .playback import infer_replay_hint, reconstruct_from_capture
 
@@ -71,7 +71,9 @@ def _quiet_load_config(path: Optional[str] = None) -> Dict[str, object]:
                 config.update(json.load(handle))
         except (OSError, json.JSONDecodeError):
             pass
-    config["environment_model"] = "native_windows"
+    config["environment_model"] = (
+        "native_windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux"
+    )
     config.setdefault("wpa_password_env", "WIFI_PIPELINE_WPA_PASSWORD")
     config.setdefault("wpa_password", "")
     if not config.get("replay_format_hint"):
@@ -84,7 +86,10 @@ def _quiet_load_config(path: Optional[str] = None) -> Dict[str, object]:
 def _quiet_save_config(config: Dict[str, object], path: Optional[str] = None) -> None:
     selected_path = _config_path(path)
     sanitized = dict(config)
-    sanitized["environment_model"] = "native_windows"
+    # Derive the correct model for the platform that is actually running right now.
+    sanitized["environment_model"] = (
+        "native_windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux"
+    )
     sanitized["wpa_password"] = ""
     selected_path.write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
 
@@ -263,6 +268,21 @@ class DashboardState:
             "wpa_password_env",
             str(config.get("wpa_password_env") or "WIFI_PIPELINE_WPA_PASSWORD"),
         )
+        config["monitor_method"] = _form_value(
+            form, "monitor_method", str(config.get("monitor_method") or "airodump")
+        ).lower()
+        config["ap_bssid"] = _form_value(form, "ap_bssid", str(config.get("ap_bssid") or ""))
+        config["ap_channel"] = _safe_int(
+            _form_value(form, "ap_channel", str(config.get("ap_channel", 6))),
+            int(config.get("ap_channel", 6) or 6),
+        )
+        config["wordlist_path"] = _form_value(
+            form, "wordlist_path", str(config.get("wordlist_path") or "/usr/share/wordlists/rockyou.txt")
+        )
+        config["deauth_count"] = _safe_int(
+            _form_value(form, "deauth_count", str(config.get("deauth_count", 10))),
+            int(config.get("deauth_count", 10) or 10),
+        )
         _quiet_save_config(config, str(self.config_path))
         self.add_log("config", "ok", "Saved configuration.", "")
         return "Saved configuration."
@@ -367,6 +387,38 @@ class DashboardState:
                 if reconstructed:
                     return f"Full pipeline finished and wrote reconstructed output to {reconstructed}"
             return "Full pipeline finished."
+
+        if action == "monitor":
+            monitor_method = _form_value(form, "monitor_method",
+                                         str(config.get("monitor_method") or "airodump"))
+            capture = Capture(config)
+            result = capture.run_monitor(method=monitor_method)
+            return result or "Monitor capture did not produce a pcap. Check that the interface supports monitor mode and you are running as root/Administrator."
+
+        if action == "crack":
+            cap = _form_value(form, "cap_path", "").strip() or None
+            capture = Capture(config)
+            result = capture.crack_and_decrypt(handshake_cap=cap)
+            return result or "Crack/decrypt step did not produce a decrypted pcap. Check that a handshake capture exists and your wordlist is configured."
+
+        if action == "wifi":
+            monitor_method = _form_value(form, "monitor_method",
+                                         str(config.get("monitor_method") or "airodump"))
+            capture = Capture(config)
+            decrypted_pcap = capture.run_full_wifi_pipeline(method=monitor_method)
+            source = decrypted_pcap or str(_capture_path(config))
+            if not Path(source).exists():
+                return "Wi-Fi lab pipeline did not produce a capture to extract from."
+            StreamExtractor(config).extract(source)
+            FormatDetector(config).detect()
+            report = CryptoAnalyzer(config).analyze(decrypted_dir or None)
+            if report and report.get("candidate_material"):
+                config_for_play = dict(config)
+                config_for_play["replay_format_hint"] = infer_replay_hint(config, report)
+                reconstructed = reconstruct_from_capture(config_for_play, report)
+                if reconstructed:
+                    return f"Full Wi-Fi lab pipeline finished. Reconstructed output: {reconstructed}"
+            return "Full Wi-Fi lab pipeline finished."
 
         raise RuntimeError(f"Unknown action: {action}")
 
@@ -562,6 +614,11 @@ def _render_dashboard_html(snapshot: Dict[str, object]) -> str:
         output_dir=str(config.get("output_dir") or ""),
         target_macs=",".join(config.get("target_macs", [])),
         ap_essid=str(config.get("ap_essid") or ""),
+        ap_bssid=str(config.get("ap_bssid") or ""),
+        ap_channel=str(config.get("ap_channel") or "6"),
+        monitor_method=str(config.get("monitor_method") or "airodump"),
+        wordlist_path=str(config.get("wordlist_path") or ""),
+        deauth_count=str(config.get("deauth_count") or "10"),
         wpa_password_env=str(config.get("wpa_password_env") or ""),
         custom_header_size=str(config.get("custom_header_size") or ""),
         custom_magic_hex=str(config.get("custom_magic_hex") or ""),
@@ -827,6 +884,16 @@ def _dashboard_template(**values: str) -> str:
                 <option value="yes">Yes</option>
               </select>
             </label>
+            <label>Monitor Method
+              <select name="monitor_method">
+                <option value="airodump" {"selected" if values.get("monitor_method") == "airodump" else ""}>airodump (Linux)</option>
+                <option value="besside" {"selected" if values.get("monitor_method") == "besside" else ""}>besside (Linux)</option>
+                <option value="tcpdump" {"selected" if values.get("monitor_method") == "tcpdump" else ""}>tcpdump (Linux/macOS)</option>
+              </select>
+            </label>
+            <label>Handshake .cap Path (crack only)
+              <input type="text" name="cap_path" value="" placeholder="auto-detected if blank" />
+            </label>
           </div>
           <div class="button-row">
             <button type="submit" name="action" value="deps">Check Env</button>
@@ -838,6 +905,15 @@ def _dashboard_template(**values: str) -> str:
             <button type="submit" name="action" value="play">Reconstruct</button>
             <button type="submit" name="action" value="all">Run Full Flow</button>
           </div>
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;color:var(--accent-2)">Wi-Fi Lab Pipeline (Linux / macOS)</summary>
+            <p class="muted" style="margin:8px 0 12px">Monitor mode, WPA2 crack, and airdecap-ng strip. Requires root and the relevant aircrack-ng toolset.</p>
+            <div class="button-row">
+              <button type="submit" name="action" value="monitor">Monitor Capture</button>
+              <button type="submit" name="action" value="crack">Crack + Decrypt</button>
+              <button type="submit" name="action" value="wifi">Full Wi-Fi Lab Flow</button>
+            </div>
+          </details>
         </form>
       </div>
 
@@ -891,6 +967,25 @@ def _dashboard_template(**values: str) -> str:
             </label>
             <label>AP ESSID
               <input type="text" name="ap_essid" value="{val('ap_essid')}" />
+            </label>
+            <label>AP BSSID
+              <input type="text" name="ap_bssid" value="{val('ap_bssid')}" placeholder="00:11:22:33:44:55" />
+            </label>
+            <label>AP Channel
+              <input type="number" name="ap_channel" value="{val('ap_channel')}" />
+            </label>
+            <label>Monitor Method
+              <select name="monitor_method">
+                <option value="airodump" {"selected" if values.get("monitor_method") == "airodump" else ""}>airodump</option>
+                <option value="besside" {"selected" if values.get("monitor_method") == "besside" else ""}>besside</option>
+                <option value="tcpdump" {"selected" if values.get("monitor_method") == "tcpdump" else ""}>tcpdump</option>
+              </select>
+            </label>
+            <label>Wordlist Path
+              <input type="text" name="wordlist_path" value="{val('wordlist_path')}" />
+            </label>
+            <label>Deauth Count (0 = passive)
+              <input type="number" name="deauth_count" value="{val('deauth_count')}" />
             </label>
             <label>WPA Password Env
               <input type="text" name="wpa_password_env" value="{val('wpa_password_env')}" />

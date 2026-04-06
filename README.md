@@ -1,136 +1,390 @@
 # Wifi-Sniffer-And-Decoder
 
-Version 3.0 — dual-platform pipeline supporting native Windows capture and Linux/Kali monitor-mode capture with integrated WPA2 cracking.
+A packet and payload inspection pipeline built around a simple flow:
+
+1. capture or import a pcap/pcapng
+2. extract payload-bearing streams and units
+3. rank likely candidate streams
+4. run heuristic analysis on the selected candidate
+5. attempt offline reconstruction or experimental playback
+
+The project is cross-platform for the **core post-capture workflow** (`extract`, `detect`, `analyze`, `play`, `web`). It also contains additional **Wi-Fi lab helpers** for monitor-mode capture, handshake collection, and WPA-related processing, but those platform-specific features do **not** have equal support on Windows.
 
 ---
 
-## Platforms
+## What the project does
 
-| Feature | Windows | Linux / Kali |
-|---|---|---|
-| dumpcap / NPcap capture | ✅ | ❌ |
-| Monitor mode (airmon-ng) | ❌ | ✅ |
-| Handshake capture (airodump-ng / besside-ng) | ❌ | ✅ |
-| WPA2 crack (aircrack-ng / hashcat) | ❌ | ✅ |
-| airdecap-ng Wi-Fi strip | ✅ (bundle) | ✅ |
-| Stream extraction / analysis / playback | ✅ | ✅ |
+At a high level, this codebase is a packet-to-artifact pipeline:
+
+- **Capture / import** traffic into a pcap/pcapng file
+- **Extract** TCP, UDP, IPv6, and some other transport flows into per-stream units
+- **Detect** likely content types and rank the most interesting streams
+- **Analyze** a chosen stream with heuristic methods and optional corpus reuse
+- **Reconstruct** or replay the chosen stream into files under `pipeline_output/replay/`
+- **Inspect** the whole run from a local browser dashboard
+
+The project is strongest when used as a **local packet analysis and reconstruction tool**. Windows is best supported for normal capture/import plus the analysis pipeline. Linux and macOS expose extra low-level network features through external tools when they are installed.
 
 ---
 
-## Setup — Windows
+## Current platform support
+
+This table reflects the code as it exists now.
+
+| Feature | Windows | Linux / Kali | macOS |
+|---|---:|---:|---:|
+| Guided menu / CLI / web dashboard | ✅ | ✅ | ✅ |
+| Standard capture via `dumpcap` | ✅ | ✅ | ✅ |
+| Fallback capture via `tcpdump` | ❌ | ✅ | ✅ |
+| Extract / detect / analyze / replay | ✅ | ✅ | ✅ |
+| Corpus archive / reuse | ✅ | ✅ | ✅ |
+| Monitor mode via `airmon-ng` | ❌ | ✅ | ❌ |
+| Monitor mode via `tcpdump -I` | ❌ | ❌ | ✅ |
+| Targeted handshake helpers in CLI | ❌ | ✅ | Limited / partial |
+| WPA crack / Wi-Fi layer strip helpers in code | Limited | ✅ | ✅ |
+
+### Important note on parity
+
+The codebase does **not** currently offer equal low-level Wi-Fi functionality across platforms. The **core analysis pipeline** is cross-platform. The **monitor / crack / full Wi-Fi lab pipeline** is more complete on Linux, partially available on macOS, and reduced on Windows.
+
+---
+
+## Project layout
+
+The source is organized around small modules with one main responsibility each.
+
+| File | Purpose |
+|---|---|
+| `videopipeline.py` | Thin launcher that calls the CLI entrypoint |
+| `cli.py` | Main command parser, guided menu, stage orchestration |
+| `config.py` | Default config, config loading/saving, interactive configuration |
+| `environment.py` | Platform detection, tool checks, interface discovery, privilege helpers |
+| `capture.py` | Standard capture plus platform-specific Wi-Fi helper logic |
+| `extract.py` | Reads pcaps, groups flows, emits stream/unit artifacts, writes `manifest.json` |
+| `analysis.py` | Payload detection, candidate ranking, heuristic stream analysis |
+| `playback.py` | Offline reconstruction and experimental playback |
+| `corpus.py` | Archives candidate stream fingerprints and reusable material |
+| `protocols.py` | Payload signatures, entropy helpers, RTP/header logic |
+| `webapp.py` | Local browser dashboard for running stages and reviewing results |
+| `ui.py` | Terminal formatting and prompt helpers |
+| `install_deps.ps1` / `install_deps.sh` | Environment bootstrap scripts |
+| `lab.json` | Saved runtime configuration |
+
+---
+
+## Requirements
+
+### Python packages
+
+Install the Python dependencies first:
+
+```bash
+pip install -r requirements.txt
+```
+
+Current `requirements.txt` is intentionally small:
+
+- `numpy>=1.26`
+- `scapy[basic]>=2.5`
+
+### Native tools
+
+The project checks for different native tools depending on platform.
+
+#### Windows
+
+Recommended:
+
+- Wireshark / NPcap (`dumpcap`, `tshark`)
+- optional: `ffplay`
+- optional: `airdecap-ng`
+
+#### Linux / Kali
+
+Commonly used by the project:
+
+- `airmon-ng`
+- `airodump-ng`
+- `aircrack-ng`
+- `airdecap-ng`
+- optional: `besside-ng`, `aireplay-ng`, `hashcat`, `tcpdump`, `ffplay`
+
+#### macOS
+
+Commonly used by the project:
+
+- built-in `tcpdump`
+- optional Wireshark tools: `dumpcap`, `tshark`
+- `aircrack-ng`
+- `airdecap-ng`
+- optional: `besside-ng`, `hashcat`, `ffplay`
+
+---
+
+## Setup
+
+### Windows
 
 ```powershell
 .\install_deps.ps1
 .\.venv\Scripts\Activate.ps1
-python .\videopipeline.py config
 python .\videopipeline.py deps
+python .\videopipeline.py config
 ```
 
-To install Wireshark and FFmpeg automatically with `winget`:
-
-```powershell
-.\install_deps.ps1 -InstallWingetPackages
-```
-
-For Wi-Fi layer stripping on Windows, install the Windows aircrack-ng bundle and add `airdecap-ng` to PATH.
-
----
-
-## Setup — Linux / Kali
+### Linux / Kali
 
 ```bash
-sudo apt update
-sudo apt install aircrack-ng hashcat hcxtools tcpdump python3-pip
-pip install -r requirements.txt
-sudo python3 videopipeline.py config
-sudo python3 videopipeline.py deps
+chmod +x install_deps.sh
+./install_deps.sh
+python3 videopipeline.py deps
+python3 videopipeline.py config
 ```
 
-> Monitor mode and handshake capture require root (`sudo`).
+For full system package installation on apt-based systems:
+
+```bash
+./install_deps.sh --full
+```
+
+### macOS
+
+You can use the shell installer for the Python environment, or install the native tools manually with Homebrew and then run:
+
+```bash
+python3 videopipeline.py deps
+python3 videopipeline.py config
+```
 
 ---
 
 ## Commands
 
-### Both platforms
+These are the commands exposed by `cli.py`.
 
-```powershell
-python .\videopipeline.py                    # Guided interactive menu
-python .\videopipeline.py menu               # Same as above
-python .\videopipeline.py web                # Browser dashboard  http://127.0.0.1:8765/
-python .\videopipeline.py config             # Interactive configuration wizard
-python .\videopipeline.py deps               # Check environment tools
-python .\videopipeline.py corpus             # Show archived candidate streams
-```
+| Command | What it does |
+|---|---|
+| `python videopipeline.py` | Opens the guided interactive menu |
+| `python videopipeline.py menu` | Same as above |
+| `python videopipeline.py config` | Opens interactive configuration |
+| `python videopipeline.py deps` | Checks required native tools and Python packages |
+| `python videopipeline.py capture` | Runs a standard capture into `pipeline_output/raw_capture.pcapng` |
+| `python videopipeline.py extract --pcap <file>` | Extracts payload streams from a pcap/pcapng |
+| `python videopipeline.py detect` | Builds `detection_report.json` from the manifest |
+| `python videopipeline.py analyze` | Builds `analysis_report.json` using heuristic analysis |
+| `python videopipeline.py play` | Attempts replay/reconstruction using the last analysis report |
+| `python videopipeline.py corpus` | Shows archived candidate stream information |
+| `python videopipeline.py web` | Starts the local web dashboard |
+| `python videopipeline.py all` | Runs capture → extract → detect → analyze, then play when possible |
+| `python videopipeline.py monitor` | Platform-specific monitor-mode helper |
+| `python videopipeline.py crack` | Platform-specific Wi-Fi helper |
+| `python videopipeline.py wifi` | Platform-specific full Wi-Fi lab pipeline |
 
-### Windows capture pipeline
+### Recommended cross-platform workflow
 
-```powershell
-python .\videopipeline.py capture
-python .\videopipeline.py capture --strip-wifi
-python .\videopipeline.py extract --pcap .\pipeline_output\raw_capture.pcapng
-python .\videopipeline.py detect
-python .\videopipeline.py analyze --decrypted .\known_plaintext
-python .\videopipeline.py play
-python .\videopipeline.py all
-python .\videopipeline.py all --strip-wifi
-```
-
-### Linux / Kali monitor-mode pipeline
+For most users, the safest and most reliable path is the **pcap-first workflow**:
 
 ```bash
-# Step-by-step
-sudo python3 videopipeline.py monitor                        # enable monitor mode + capture handshake
-sudo python3 videopipeline.py monitor --method besside       # automatic multi-AP sweep
-sudo python3 videopipeline.py monitor --method tcpdump       # generic raw 802.11 dump
-sudo python3 videopipeline.py crack                          # crack PSK + airdecap-ng
-sudo python3 videopipeline.py crack --cap ./hs.cap           # supply your own handshake
+python videopipeline.py deps
+python videopipeline.py config
+python videopipeline.py extract --pcap path/to/input.pcapng
+python videopipeline.py detect
+python videopipeline.py analyze
+python videopipeline.py play
+```
 
-# Extract / detect / analyze as normal
-sudo python3 videopipeline.py extract
-sudo python3 videopipeline.py detect
-sudo python3 videopipeline.py analyze
-sudo python3 videopipeline.py play
+### Standard capture workflow
 
-# Full end-to-end in one command
-sudo python3 videopipeline.py wifi
-sudo python3 videopipeline.py wifi --method besside
+If your platform has working capture tooling configured:
+
+```bash
+python videopipeline.py capture
+python videopipeline.py detect
+python videopipeline.py analyze
+python videopipeline.py play
+```
+
+### One-command workflow
+
+```bash
+python videopipeline.py all
 ```
 
 ---
 
-## Configuration (lab.json)
+## How the pipeline works
 
-Key fields added in v3:
+### 1) Configure
 
-| Key | Default | Purpose |
-|---|---|---|
-| `ap_bssid` | `""` | BSSID of target AP (required for airodump-ng) |
-| `ap_channel` | `6` | Wi-Fi channel of target AP |
-| `monitor_method` | `"airodump"` | `airodump` / `besside` / `tcpdump` |
-| `wordlist_path` | `/usr/share/wordlists/rockyou.txt` | Dictionary for aircrack-ng / hashcat |
-| `handshake_timeout` | `120` | Seconds to wait for handshake capture |
-| `crack_timeout` | `600` | Seconds allowed for cracking |
-| `deauth_count` | `10` | Deauth frames sent to force reconnect (`0` = passive) |
-| `hashcat_rules` | `""` | Optional hashcat rules file path |
+Run:
 
-> **Never store your WPA password in lab.json.** Use the environment variable instead:
->
-> ```bash
-> export WIFI_PIPELINE_WPA_PASSWORD="yourpassword"
-> ```
+```bash
+python videopipeline.py config
+```
+
+This writes settings to `lab.json`. Important groups of settings include:
+
+- interface and capture duration
+- protocol and target port
+- output directory
+- payload header stripping and custom magic bytes
+- replay format hints
+- corpus thresholds
+- optional Wi-Fi-lab-related fields
+
+The WPA password field is intentionally **not** written back to disk. If you use that part of the project, the saved config is sanitized on write.
+
+### 2) Capture or import
+
+You can either:
+
+- capture traffic with `capture`, or
+- point `extract` at an existing pcap/pcapng file
+
+If extraction finds no matching traffic for the configured protocol/port, it falls back to scanning all transport flows it knows how to process.
+
+### 3) Extract
+
+`extract.py` writes:
+
+- `pipeline_output/manifest.json`
+- `pipeline_output/reassembled_streams/`
+- `pipeline_output/extracted_units/`
+
+The manifest includes:
+
+- source pcap path
+- capture interface and platform model
+- filter settings
+- stream statistics
+- stream summaries
+- emitted units
+- control events
+
+### 4) Detect
+
+`detect` samples extracted units and writes `pipeline_output/detection_report.json`.
+
+This stage:
+
+- computes entropy samples
+- records content-type counts
+- checks for known protocol/payload indicators
+- correlates some control traffic
+- ranks candidate streams and selects a top candidate
+
+### 5) Analyze
+
+`analyze` writes `pipeline_output/analysis_report.json`.
+
+This stage tries to answer questions like:
+
+- which stream is the best candidate to focus on?
+- what does the ciphertext/statistical profile look like?
+- is there reusable material in the local corpus?
+- is there enough candidate material to attempt reconstruction?
+
+If it can prepare candidate material, it also archives the result into the corpus and may produce artifacts under:
+
+- `pipeline_output/candidate_keystreams/`
+- `pipeline_output/corpus/`
+
+### 6) Replay / reconstruct
+
+`play` uses the latest analysis result and attempts one of two things:
+
+- **offline reconstruction** into files under `pipeline_output/replay/`, or
+- **experimental playback** with `ffplay` when the format hint and environment support it
 
 ---
 
-## What Changed in v3
+## Output directory layout
 
-- **IPv6 support** — extraction now handles IPv6 frames; the old `IP not in packet` guard is gone.
-- **Non-TCP/UDP protocols** — ICMP, ICMPv6, SCTP, and GRE flows are now extracted and written as `raw_datagram` units.
-- **Monitor-mode capture** — `airmon-ng` integration via the new `monitor` subcommand; puts the card into monitor mode to capture all frames on the air including third-party device traffic invisible to managed-mode captures.
-- **Handshake capture** — `airodump-ng` (targeted) and `besside-ng` (automatic) wired into the pipeline.
-- **WPA2 cracking** — aircrack-ng dictionary attack followed by hashcat PMKID/HCCAPX fallback; recovered PSK is fed directly into `airdecap-ng`.
-- **`wifi` subcommand** — runs the full Linux pipeline end-to-end in one command.
-- **Platform-aware environment check** — `deps` now shows the correct tool list for Windows or Linux.
-- **`environment_model` no longer forced to `native_windows` on Linux.**
-- **`run_extract` prefers the decrypted pcap** when it exists, so you don't have to pass `--pcap` explicitly after a `crack` run.
-- Schema version bumped to 3 with `stream_stats` breakdown in the manifest.
+A typical run writes files under `pipeline_output/`:
+
+```text
+pipeline_output/
+├── raw_capture.pcapng
+├── manifest.json
+├── detection_report.json
+├── analysis_report.json
+├── extracted_units/
+├── reassembled_streams/
+├── candidate_keystreams/
+├── replay/
+└── corpus/
+```
+
+Not every run will produce every directory.
+
+---
+
+## Web dashboard
+
+Start it with:
+
+```bash
+python videopipeline.py web
+```
+
+Default address:
+
+- `http://127.0.0.1:8765/`
+
+The dashboard exposes the current config, recent artifacts, candidate stream information, corpus status, and buttons/forms for running the same major stages exposed by the CLI.
+
+---
+
+## Key config fields
+
+These are the most important settings for the core workflow.
+
+| Key | Meaning |
+|---|---|
+| `interface` | Capture interface name |
+| `capture_duration` | Capture time in seconds (`0` means manual stop) |
+| `output_dir` | Base output directory |
+| `protocol` | Primary transport filter (`udp` or `tcp`) |
+| `video_port` | Primary port filter |
+| `custom_header_size` | Extra bytes to strip after the transport header |
+| `custom_magic_hex` | Optional hex signature used to boost candidate ranking |
+| `preferred_stream_id` | Stream to prioritize in later stages |
+| `min_candidate_bytes` | Minimum size before a stream is treated as serious |
+| `replay_format_hint` | Output/replay hint such as `raw`, `json`, `jpeg`, `mpegts`, `h264`, `h265` |
+| `corpus_review_threshold` | Similarity threshold for surfacing prior corpus matches |
+| `corpus_auto_reuse_threshold` | Similarity threshold for auto-reusing candidate material |
+| `playback_mode` | `file`, `ffplay`, or `both` |
+| `jitter_buffer_packets` | UDP jitter buffer size used by playback logic |
+
+There are additional Wi-Fi-specific fields in `lab.json`, but they are only relevant if you are using those platform-specific helpers.
+
+---
+
+## What is accurate to say about this repo right now
+
+This repo is best described as:
+
+> a cross-platform packet and payload analysis pipeline with standard capture/import support on all major desktop platforms, plus additional platform-specific Wi-Fi helper code that is currently most complete on Linux.
+
+It is **not** accurate to describe the project as having full feature parity between Windows and Linux for low-level Wi-Fi operations.
+
+---
+
+## Limitations
+
+- Windows does not have equal support for the low-level Wi-Fi helper path.
+- The project depends heavily on external native tools for capture and some replay/decryption-related features.
+- Some format detection and reconstruction paths are heuristic and may require tuning via `lab.json`.
+- The launcher expects a package layout where the modules are importable as `wifi_pipeline.*`.
+
+---
+
+## Suggested next cleanup tasks
+
+If you continue developing this project, the biggest quality improvements would be:
+
+1. separate the **core analysis pipeline** from the platform-specific Wi-Fi helper code
+2. add a centralized capability map so the UI only shows supported actions per platform
+3. make the package layout explicit in the repo structure
+4. improve Windows parity for the standard capture/import and analysis path
+5. add tests for manifest generation, candidate ranking, and reconstruction
