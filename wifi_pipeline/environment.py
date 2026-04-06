@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 from .ui import BOLD, CYAN, DIM, RESET, ask, confirm, err, info, ok, section, warn
 
 IS_WINDOWS = sys.platform.startswith("win")
+IS_LINUX = sys.platform.startswith("linux")
 
 
 @dataclass
@@ -20,30 +21,50 @@ class ToolStatus:
     path: Optional[str]
 
 
-REQUIRED_TOOLS = (
-    ("dumpcap", "Packet capture through NPcap/Wireshark", True),
-    ("tshark", "Packet parsing and inspection", True),
-    ("ffplay", "Optional playback preview", False),
-    ("airdecap-ng", "Optional Wi-Fi layer decryption", False),
+# Tools required/optional on Windows (original behaviour)
+WINDOWS_TOOLS = (
+    ("dumpcap",      "Packet capture through NPcap/Wireshark",  True),
+    ("tshark",       "Packet parsing and inspection",           True),
+    ("ffplay",       "Optional playback preview",               False),
+    ("airdecap-ng",  "Optional Wi-Fi layer decryption",         False),
+)
+
+# Tools required/optional on Linux / Kali (piracy pipeline)
+LINUX_TOOLS = (
+    ("airmon-ng",    "Enable/disable monitor mode",             True),
+    ("airodump-ng",  "Targeted WPA2 handshake capture",         True),
+    ("aireplay-ng",  "Deauth frames for faster handshake",      False),
+    ("aircrack-ng",  "WPA2 PSK dictionary crack",               True),
+    ("besside-ng",   "Automatic multi-AP handshake capture",    False),
+    ("airdecap-ng",  "Strip Wi-Fi layer from pcap",             True),
+    ("hashcat",      "GPU-accelerated WPA2 crack (optional)",   False),
+    ("cap2hccapx",   "Convert .cap to hashcat format",          False),
+    ("hcxpcapngtool","Alternative cap converter (hcxtools)",    False),
+    ("tcpdump",      "Generic monitor-mode raw capture",        False),
+    ("ffplay",       "Optional playback preview",               False),
+)
+
+# Tools needed on both platforms
+COMMON_TOOLS = (
+    ("python3",      "Python interpreter",                      True),
 )
 
 
 def is_admin() -> bool:
-    if not IS_WINDOWS:
-        return False
-    try:
-        import ctypes
-
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        return False
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    # Linux: check for root
+    return os.geteuid() == 0
 
 
 def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
     if not IS_WINDOWS:
-        raise RuntimeError("Elevation helper is only available on Windows")
+        raise RuntimeError("UAC elevation helper is Windows-only; use sudo on Linux.")
     import ctypes
-
     argv = list(sys.argv[1:] if argv is None else argv)
     script = os.path.abspath(sys.argv[0])
     args = " ".join([f'"{script}"'] + [f'"{item}"' for item in argv])
@@ -54,39 +75,35 @@ def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
 
 def check_environment() -> bool:
     section("Environment Check")
-    if not IS_WINDOWS:
-        err("This repository is now standardized on native Windows tools.")
-        warn("Capture and install scripts expect NPcap/Wireshark, FFmpeg, and PowerShell.")
-        return False
 
+    platform_tools = WINDOWS_TOOLS if IS_WINDOWS else LINUX_TOOLS
     all_required = True
-    for name, purpose, required in REQUIRED_TOOLS:
+
+    for name, purpose, required in (*COMMON_TOOLS, *platform_tools):
         path = shutil.which(name)
         status = f"{CYAN}*{RESET}" if path else f"{DIM}-{RESET}"
         requirement = "required" if required else "optional"
         location = path or "not found on PATH"
-        print(f"  {status} {name:<12} {purpose} {DIM}({requirement}){RESET}")
+        print(f"  {status} {name:<16} {purpose} {DIM}({requirement}){RESET}")
         print(f"      {location}")
         if required and not path:
             all_required = False
 
-    try:
-        import scapy  # noqa: F401
-
-        ok("Python package available: scapy")
-    except ImportError:
-        warn("Python package missing: scapy")
-        all_required = False
-
-    try:
-        import numpy  # noqa: F401
-
-        ok("Python package available: numpy")
-    except ImportError:
-        warn("Python package missing: numpy")
+    # Python packages
+    for pkg in ("scapy", "numpy"):
+        try:
+            __import__(pkg)
+            ok(f"Python package available: {pkg}")
+        except ImportError:
+            warn(f"Python package missing: {pkg}")
+            if pkg == "scapy":
+                all_required = False
 
     if not is_admin():
-        warn("Administrator rights are recommended for capture and interface discovery.")
+        if IS_WINDOWS:
+            warn("Administrator rights are recommended for capture and interface discovery.")
+        else:
+            warn("Root (sudo) is required for monitor mode and raw socket capture on Linux.")
 
     return all_required
 
@@ -110,9 +127,39 @@ def _parse_dumpcap_interfaces(output: str) -> List[Tuple[str, str, str]]:
     return interfaces
 
 
+def _list_linux_interfaces() -> List[Tuple[str, str, str]]:
+    """List wireless interfaces on Linux using iw or iwconfig."""
+    interfaces: List[Tuple[str, str, str]] = []
+    iw = shutil.which("iw")
+    if iw:
+        result = subprocess.run(
+            ["iw", "dev"], capture_output=True, text=True, timeout=5, check=False
+        )
+        current_iface = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Interface "):
+                current_iface = line.split()[1]
+                interfaces.append((str(len(interfaces) + 1), current_iface, "wireless (iw)"))
+        if interfaces:
+            return interfaces
+
+    # Fallback: /sys/class/net
+    net_path = "/sys/class/net"
+    if os.path.isdir(net_path):
+        for index, name in enumerate(sorted(os.listdir(net_path)), start=1):
+            if name.startswith(("wlan", "wlp", "ath", "mon")):
+                interfaces.append((str(index), name, "wireless"))
+    return interfaces
+
+
 def list_interfaces() -> List[Tuple[str, str, str]]:
+    if IS_LINUX:
+        return _list_linux_interfaces()
+
     if not IS_WINDOWS:
         return []
+
     dumpcap = shutil.which("dumpcap")
     if dumpcap:
         try:
@@ -162,7 +209,10 @@ def pick_interface(current: str) -> str:
     interfaces = list_interfaces()
     if not interfaces:
         warn("Unable to enumerate interfaces automatically.")
-        print(f"  {BOLD}Tip:{RESET} install Wireshark/NPcap and re-run in an Administrator shell.")
+        if IS_WINDOWS:
+            print(f"  {BOLD}Tip:{RESET} install Wireshark/NPcap and re-run in an Administrator shell.")
+        else:
+            print(f"  {BOLD}Tip:{RESET} install iw ('sudo apt install iw') and re-run as root.")
         return ask("Capture interface", current or "")
 
     section("Available Interfaces")
@@ -181,6 +231,10 @@ def pick_interface(current: str) -> str:
 
 
 def maybe_elevate_for_capture(interactive: bool = True) -> bool:
+    if IS_LINUX:
+        if not is_admin():
+            warn("Monitor mode and raw capture require root on Linux. Re-run with sudo.")
+        return False   # Don't block — let the underlying tool produce the real error
     if not IS_WINDOWS:
         return False
     if is_admin():
