@@ -92,6 +92,30 @@ Test the connection:
 ssh pi@raspberrypi
 ```
 
+## Tests and checks
+
+Install test dependencies:
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+Run the quick check script (syntax plus tests):
+
+```powershell
+.\scripts\check.ps1
+```
+
+```bash
+./scripts/check.sh
+```
+
 ## Commands
 
 | Command | What it does |
