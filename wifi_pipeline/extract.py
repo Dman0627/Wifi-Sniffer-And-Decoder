@@ -142,7 +142,7 @@ class StreamExtractor:
             return packet[TCP].sport == port or packet[TCP].dport == port
         if protocol_name == "udp" and UDP in packet:
             return packet[UDP].sport == port or packet[UDP].dport == port
-        if protocol_name == "icmp" and (ICMP in packet or ICMPv6EchoRequest in packet):
+        if protocol_name == "icmp" and (ICMP in packet or ICMPv6EchoRequest in packet or ICMPv6EchoReply in packet):
             return True
         if protocol_name == "sctp" and SCTP in packet:
             return True

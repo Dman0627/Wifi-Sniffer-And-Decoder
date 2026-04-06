@@ -352,7 +352,7 @@ def run_capture(config: Dict[str, object], strip_wifi: bool = False) -> Optional
 
 
 def run_monitor(config: Dict[str, object], method: Optional[str] = None) -> Optional[str]:
-    """Enable monitor mode and capture raw 802.11 frames (Linux/Kali and macOS)."""
+    """Enable monitor mode and capture raw 802.11 frames (Linux/macOS, Windows when supported)."""
     capture = Capture(config)
     chosen_method = method or str(config.get("monitor_method") or "airodump")
     return capture.run_monitor(method=chosen_method)
@@ -452,7 +452,7 @@ def interactive_menu(config: Dict[str, object]) -> int:
         options = [
             "Guided setup / configure device",                    # 0
             "Capture traffic (dumpcap / tcpdump fallback)",       # 1
-            "Monitor mode capture (Linux / macOS)",               # 2
+            "Monitor mode capture (airodump/besside/tcpdump)",   # 2
             "Crack WPA2 + decrypt pcap",                          # 3
             "Strip Wi-Fi layer on an existing pcap",              # 4
             "Extract payload streams from a pcap",                # 5
@@ -463,7 +463,7 @@ def interactive_menu(config: Dict[str, object]) -> int:
             "Run cipher heuristics",                              # 10
             "Start experimental replay / reconstruction",         # 11
             "Run full pipeline (dumpcap / tcpdump capture)",      # 12
-            "Run full Wi-Fi pipeline (Linux/macOS monitor+crack)",# 13
+            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 13
             "Show latest report summary",                         # 14
             "Show corpus archive",                                # 15
             "Launch web dashboard",                               # 16
@@ -533,7 +533,7 @@ def interactive_menu(config: Dict[str, object]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="WiFi payload pipeline — Windows capture + Linux monitor/crack + flow extraction."
+        description="WiFi payload pipeline — cross-platform capture/import + optional Wi-Fi lab helpers."
     )
     parser.add_argument("--config", default=None, help="Path to a JSON config file")
     parser.add_argument("--stage", default=None, help=argparse.SUPPRESS)
@@ -549,8 +549,8 @@ def build_parser() -> argparse.ArgumentParser:
     capture_p = subparsers.add_parser("capture", help="Capture traffic into a pcap (dumpcap, or tcpdump fallback)")
     capture_p.add_argument("--strip-wifi", action="store_true", help="Run airdecap-ng after capture")
 
-    # ── Linux / macOS monitor mode ────────────────────────────────────────────
-    monitor_p = subparsers.add_parser("monitor", help="Enable monitor mode and capture raw 802.11 frames (Linux/Kali and macOS)")
+    # ── Monitor mode (Linux/macOS, Windows when supported) ────────────────────
+    monitor_p = subparsers.add_parser("monitor", help="Enable monitor mode and capture raw 802.11 frames (Linux/macOS, Windows when supported)")
     monitor_p.add_argument(
         "--method",
         default=None,
@@ -562,10 +562,10 @@ def build_parser() -> argparse.ArgumentParser:
     crack_p = subparsers.add_parser("crack", help="Crack WPA2 PSK from a handshake capture then decrypt with airdecap-ng")
     crack_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
 
-    # ── Full Linux Wi-Fi pipeline ────────────────────────────────────────────
+    # ── Full Wi-Fi pipeline ──────────────────────────────────────────────────
     wifi_p = subparsers.add_parser(
         "wifi",
-        help="Full Linux pipeline: monitor mode → handshake capture → WPA2 crack → airdecap-ng",
+        help="Full Wi-Fi pipeline: monitor mode → handshake capture → WPA2 crack → airdecap-ng",
     )
     wifi_p.add_argument("--method", default=None, choices=["airodump", "besside", "tcpdump"])
     wifi_p.add_argument("--decrypted", default=None, help="Directory of decrypted reference units")

@@ -10,6 +10,25 @@ A packet and payload inspection pipeline built around a simple flow:
 
 The project is cross-platform for the **core post-capture workflow** (`extract`, `detect`, `analyze`, `play`, `web`). It also contains additional **Wi-Fi lab helpers** for monitor-mode capture, handshake collection, and WPA-related processing, but those platform-specific features do **not** have equal support on Windows.
 
+Highlights:
+
+- pcap-first workflow that works on Windows, Linux, and macOS
+- stream extraction, heuristic ranking, and offline reconstruction
+- optional Wi-Fi lab helpers when the native toolchain is available
+
+## Quickstart (pcap-first)
+
+If you already have a capture file, this is the fastest path:
+
+```bash
+python videopipeline.py deps
+python videopipeline.py config
+python videopipeline.py extract --pcap path/to/input.pcapng
+python videopipeline.py detect
+python videopipeline.py analyze
+python videopipeline.py play
+```
+
 ---
 
 ## What the project does
@@ -40,12 +59,13 @@ This table reflects the code as it exists now.
 | Corpus archive / reuse | ✅ | ✅ | ✅ |
 | Monitor mode via `airmon-ng` | ❌ | ✅ | ❌ |
 | Monitor mode via `tcpdump -I` | ❌ | ❌ | ✅ |
-| Targeted handshake helpers in CLI | ❌ | ✅ | Limited / partial |
+| Monitor mode via Npcap `WlanHelper` | Limited / adapter-dependent | ❌ | ❌ |
+| Targeted handshake helpers in CLI | Limited / adapter-dependent | ✅ | Limited / partial |
 | WPA crack / Wi-Fi layer strip helpers in code | Limited | ✅ | ✅ |
 
 ### Important note on parity
 
-The codebase does **not** currently offer equal low-level Wi-Fi functionality across platforms. The **core analysis pipeline** is cross-platform. The **monitor / crack / full Wi-Fi lab pipeline** is more complete on Linux, partially available on macOS, and reduced on Windows.
+The codebase does **not** currently offer equal low-level Wi-Fi functionality across platforms. The **core analysis pipeline** is cross-platform. The **monitor / crack / full Wi-Fi lab pipeline** is most reliable on Linux, partially available on macOS, and on Windows is adapter/driver dependent (Npcap monitor mode).
 
 ---
 
@@ -96,8 +116,9 @@ The project checks for different native tools depending on platform.
 Recommended:
 
 - Wireshark / NPcap (`dumpcap`, `tshark`)
+- NPcap `WlanHelper.exe` (monitor mode toggle; typically at `C:\Windows\System32\Npcap\WlanHelper.exe`)
 - optional: `ffplay`
-- optional: `airdecap-ng`
+- optional (Wi-Fi lab): `aircrack-ng`, `airodump-ng`, `airdecap-ng`, `hashcat`, `besside-ng`, `aireplay-ng`
 
 #### Linux / Kali
 
@@ -132,6 +153,8 @@ python .\videopipeline.py deps
 python .\videopipeline.py config
 ```
 
+Run capture or monitor-mode steps from an elevated PowerShell window when possible.
+
 ### Linux / Kali
 
 ```bash
@@ -158,6 +181,24 @@ python3 videopipeline.py config
 
 ---
 
+## Windows monitor-mode notes (Npcap)
+
+Monitor mode on Windows is adapter and driver dependent. If your adapter supports it:
+
+1. Install Npcap with "Support raw 802.11 traffic and monitor mode" enabled.
+2. Confirm `WlanHelper.exe` is present (usually `C:\Windows\System32\Npcap\WlanHelper.exe`).
+3. Run PowerShell as Administrator.
+4. Toggle the adapter into monitor mode with `WlanHelper.exe`, then use the `monitor` or `wifi` commands.
+
+Example:
+
+```powershell
+& "C:\Windows\System32\Npcap\WlanHelper.exe" "<Wi-Fi Name or GUID>" mode monitor
+python .\videopipeline.py monitor --method tcpdump
+```
+
+If you get no traffic in monitor mode, your adapter likely lacks support. Consider a USB adapter known to support monitor mode, or use WSL2 with a Linux toolchain for full parity.
+
 ## Commands
 
 These are the commands exposed by `cli.py`.
@@ -179,19 +220,6 @@ These are the commands exposed by `cli.py`.
 | `python videopipeline.py monitor` | Platform-specific monitor-mode helper |
 | `python videopipeline.py crack` | Platform-specific Wi-Fi helper |
 | `python videopipeline.py wifi` | Platform-specific full Wi-Fi lab pipeline |
-
-### Recommended cross-platform workflow
-
-For most users, the safest and most reliable path is the **pcap-first workflow**:
-
-```bash
-python videopipeline.py deps
-python videopipeline.py config
-python videopipeline.py extract --pcap path/to/input.pcapng
-python videopipeline.py detect
-python videopipeline.py analyze
-python videopipeline.py play
-```
 
 ### Standard capture workflow
 

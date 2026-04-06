@@ -26,8 +26,14 @@ class ToolStatus:
 WINDOWS_TOOLS = (
     ("dumpcap",      "Packet capture through NPcap/Wireshark",  True),
     ("tshark",       "Packet parsing and inspection",           True),
+    ("WlanHelper",   "Npcap Wi-Fi mode helper (monitor/managed)", False),
     ("ffplay",       "Optional playback preview",               False),
-    ("airdecap-ng",  "Optional Wi-Fi layer decryption",         False),
+    ("airdecap-ng",  "Wi-Fi layer decryption (aircrack-ng)",   False),
+    ("aircrack-ng",  "WPA2 handshake capture and cracking",     False),
+    ("airodump-ng",  "Targeted WPA2 handshake capture",         False),
+    ("aireplay-ng",  "Deauth frames for faster handshake",      False),
+    ("besside-ng",   "Automatic multi-AP handshake capture",    False),
+    ("hashcat",      "GPU-accelerated WPA2 crack",             False),
 )
 
 # Tools required/optional on Linux / Kali
@@ -61,10 +67,27 @@ MACOS_TOOLS = (
     ("ffplay",       "Optional playback preview (brew install ffmpeg)", False),
 )
 
-# Tools needed on all platforms
-COMMON_TOOLS = (
-    ("python3",      "Python interpreter",                      True),
-)
+def _find_windows_wlanhelper() -> Optional[str]:
+    if not IS_WINDOWS:
+        return None
+
+    for name in ("WlanHelper.exe", "WlanHelper"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    system_root = os.environ.get("SYSTEMROOT") or os.environ.get("SystemRoot") or r"C:\Windows"
+    candidates = [
+        os.path.join(system_root, "System32", "Npcap", "WlanHelper.exe"),
+        os.path.join(system_root, "Sysnative", "Npcap", "WlanHelper.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Npcap", "WlanHelper.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Npcap", "WlanHelper.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    return None
 
 
 def is_admin() -> bool:
@@ -101,8 +124,13 @@ def check_environment() -> bool:
         platform_tools = LINUX_TOOLS
     all_required = True
 
-    for name, purpose, required in (*COMMON_TOOLS, *platform_tools):
-        path = shutil.which(name)
+    ok(f"Python runtime: {sys.executable} ({sys.version.split()[0]})")
+
+    for name, purpose, required in platform_tools:
+        if IS_WINDOWS and name.lower().startswith("wlanhelper"):
+            path = _find_windows_wlanhelper()
+        else:
+            path = shutil.which(name)
         status = f"{CYAN}*{RESET}" if path else f"{DIM}-{RESET}"
         requirement = "required" if required else "optional"
         location = path or "not found on PATH"

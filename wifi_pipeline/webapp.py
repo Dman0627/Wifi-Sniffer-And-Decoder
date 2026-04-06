@@ -392,7 +392,7 @@ class DashboardState:
             monitor_method = _form_value(form, "monitor_method",
                                          str(config.get("monitor_method") or "airodump"))
             capture = Capture(config)
-            result = capture.run_monitor(method=monitor_method)
+            result = capture.run_monitor(method=monitor_method, interactive=False)
             return result or "Monitor capture did not produce a pcap. Check that the interface supports monitor mode and you are running as root/Administrator."
 
         if action == "crack":
@@ -405,7 +405,7 @@ class DashboardState:
             monitor_method = _form_value(form, "monitor_method",
                                          str(config.get("monitor_method") or "airodump"))
             capture = Capture(config)
-            decrypted_pcap = capture.run_full_wifi_pipeline(method=monitor_method)
+            decrypted_pcap = capture.run_full_wifi_pipeline(method=monitor_method, interactive=False)
             source = decrypted_pcap or str(_capture_path(config))
             if not Path(source).exists():
                 return "Wi-Fi lab pipeline did not produce a capture to extract from."
@@ -886,9 +886,9 @@ def _dashboard_template(**values: str) -> str:
             </label>
             <label>Monitor Method
               <select name="monitor_method">
-                <option value="airodump" {"selected" if values.get("monitor_method") == "airodump" else ""}>airodump (Linux)</option>
-                <option value="besside" {"selected" if values.get("monitor_method") == "besside" else ""}>besside (Linux)</option>
-                <option value="tcpdump" {"selected" if values.get("monitor_method") == "tcpdump" else ""}>tcpdump (Linux/macOS)</option>
+                <option value="airodump" {"selected" if values.get("monitor_method") == "airodump" else ""}>airodump (targeted)</option>
+                <option value="besside" {"selected" if values.get("monitor_method") == "besside" else ""}>besside (auto)</option>
+                <option value="tcpdump" {"selected" if values.get("monitor_method") == "tcpdump" else ""}>tcpdump (generic; uses dumpcap on Windows)</option>
               </select>
             </label>
             <label>Handshake .cap Path (crack only)
@@ -906,8 +906,8 @@ def _dashboard_template(**values: str) -> str:
             <button type="submit" name="action" value="all">Run Full Flow</button>
           </div>
           <details style="margin-top:12px">
-            <summary style="cursor:pointer;color:var(--accent-2)">Wi-Fi Lab Pipeline (Linux / macOS)</summary>
-            <p class="muted" style="margin:8px 0 12px">Monitor mode, WPA2 crack, and airdecap-ng strip. Requires root and the relevant aircrack-ng toolset.</p>
+            <summary style="cursor:pointer;color:var(--accent-2)">Wi-Fi Lab Pipeline</summary>
+            <p class="muted" style="margin:8px 0 12px">Monitor mode, WPA2 crack, and airdecap-ng strip. Most reliable on Linux; Windows requires Npcap monitor mode + aircrack-ng and is adapter-dependent.</p>
             <div class="button-row">
               <button type="submit" name="action" value="monitor">Monitor Capture</button>
               <button type="submit" name="action" value="crack">Crack + Decrypt</button>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,19 +37,85 @@ def _require(tool: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Monitor-mode helpers  (wi-fi lab pipeline — Linux, macOS)
+# Windows Npcap monitor-mode helper (WlanHelper.exe)
+# ---------------------------------------------------------------------------
+
+_GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+def _extract_guid(text: str) -> Optional[str]:
+    match = _GUID_RE.search(text or "")
+    return match.group(0) if match else None
+
+
+def _find_wlanhelper() -> Optional[str]:
+    if not IS_WINDOWS:
+        return None
+
+    for name in ("WlanHelper.exe", "WlanHelper"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    system_root = os.environ.get("SYSTEMROOT") or os.environ.get("SystemRoot") or r"C:\Windows"
+    candidates = [
+        os.path.join(system_root, "System32", "Npcap", "WlanHelper.exe"),
+        os.path.join(system_root, "Sysnative", "Npcap", "WlanHelper.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Npcap", "WlanHelper.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Npcap", "WlanHelper.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _wlanhelper_target(interface: str) -> str:
+    """
+    WlanHelper expects a Wi-Fi interface Name or GUID (netsh wlan show interfaces).
+    The pipeline config often stores a Npcap device like \\Device\\NPF_{GUID}.
+    Prefer the GUID form when we can extract it.
+    """
+    guid = _extract_guid(interface)
+    return guid or interface
+
+
+def _wlanhelper_get_mode(wlanhelper: str, target: str) -> Optional[str]:
+    result = _run([wlanhelper, target, "mode"], timeout=5)
+    output = (result.stdout or result.stderr or "").strip().lower()
+    for line in output.splitlines():
+        line = line.strip()
+        if line in ("managed", "monitor"):
+            return line
+    return None
+
+
+def _wlanhelper_set_mode(wlanhelper: str, target: str, mode: str) -> bool:
+    result = _run([wlanhelper, target, "mode", mode], timeout=10)
+    output = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        err(f"WlanHelper failed: {output or 'unknown error'}")
+        return False
+    # Typical output is "Success", but treat any exit code 0 as success.
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Monitor-mode helpers  (wi-fi lab pipeline — Linux, macOS, Windows)
 # ---------------------------------------------------------------------------
 
 class MonitorMode:
     """
-    Wraps airmon-ng enable / disable.
-    On Windows this is a no-op; the caller can still use a pre-configured
-    monitor interface (e.g. a USB adapter set to monitor mode externally).
+    Wraps airmon-ng enable/disable on Linux and Npcap WlanHelper on Windows.
+    If Windows monitor mode switching is unavailable, the caller can still use a
+    pre-configured monitor interface (e.g. a USB adapter set to monitor mode externally).
     """
 
     def __init__(self, interface: str) -> None:
         self.base_interface = interface
         self.monitor_interface: Optional[str] = None
+        self._previous_windows_mode: Optional[str] = None
 
     def enable(self) -> Optional[str]:
         """
@@ -56,13 +123,43 @@ class MonitorMode:
         Returns the monitor interface name (e.g. 'wlan0mon') or None on failure.
         """
         if IS_WINDOWS:
-            warn("airmon-ng monitor mode is not available on Windows. "
-                 "Configure a monitor-mode adapter externally.")
+            wlanhelper = _find_wlanhelper()
+            if not wlanhelper:
+                warn("WlanHelper.exe not found. Cannot switch monitor mode automatically on Windows.")
+                warn("Install Npcap with 802.11 support and run as Administrator.")
+                self.monitor_interface = self.base_interface
+                return self.base_interface
+
+            target = _wlanhelper_target(self.base_interface)
+            previous = _wlanhelper_get_mode(wlanhelper, target)
+            self._previous_windows_mode = previous
+
+            if previous == "monitor":
+                ok("Adapter already in monitor mode.")
+                self.monitor_interface = self.base_interface
+                return self.base_interface
+
+            info("Enabling monitor mode via Npcap WlanHelper...")
+            if not _wlanhelper_set_mode(wlanhelper, target, "monitor"):
+                err("Unable to enable monitor mode. Verify adapter/driver support and Npcap settings.")
+                return None
+
+            # Best-effort verification so we can warn if the driver ignored the request.
+            now = _wlanhelper_get_mode(wlanhelper, target)
+            if now != "monitor":
+                warn("WlanHelper ran but mode did not read back as monitor.")
+                warn("Your adapter/driver may not support Npcap monitor mode.")
+
+            ok("Monitor mode enabled.")
             self.monitor_interface = self.base_interface
             return self.base_interface
 
         airmon = _require("airmon-ng")
         if not airmon:
+            if IS_WINDOWS:
+                warn("airmon-ng not found on Windows. Using interface as-is for aircrack-ng tools.")
+                self.monitor_interface = self.base_interface
+                return self.base_interface
             return None
 
         # Kill interfering processes first
@@ -92,7 +189,16 @@ class MonitorMode:
         return mon_iface
 
     def disable(self) -> None:
-        if IS_WINDOWS or not self.monitor_interface:
+        if not self.monitor_interface:
+            return
+        if IS_WINDOWS:
+            wlanhelper = _find_wlanhelper()
+            if not wlanhelper:
+                return
+            target = _wlanhelper_target(self.base_interface)
+            restore = self._previous_windows_mode or "managed"
+            info(f"Restoring Windows Wi-Fi mode: {restore}")
+            _wlanhelper_set_mode(wlanhelper, target, restore)
             return
         airmon = shutil.which("airmon-ng")
         if airmon:
@@ -455,10 +561,10 @@ class Capture:
         duration = int(self.config.get("capture_duration", 60) or 0)
 
         cmd = ["tcpdump", "-i", interface, "-w", str(self.raw_capture)]
-        if capture_filter:
-            cmd.extend(["-f", capture_filter])
         if duration > 0:
             cmd.extend(["-G", str(duration), "-W", "1"])
+        if capture_filter:
+            cmd.append(capture_filter)
 
         info(f"Interface : {interface}")
         info(f"Filter    : {capture_filter or '(none)'}")
@@ -480,23 +586,23 @@ class Capture:
     def run_monitor(
         self,
         method: str = "airodump",   # "airodump" | "besside" | "tcpdump"
+        interactive: bool = True,
     ) -> Optional[str]:
         """
         Full wi-fi lab pipeline:
-          1. Enable monitor mode  (airmon-ng)
+          1. Enable monitor mode  (airmon-ng on Linux, WlanHelper on Windows)
           2. Capture raw 802.11 frames including frames from third-party clients
-             that would be invisible to a normal Windows managed-mode capture.
+             that would be invisible to a normal managed-mode capture.
           3. Return path to the raw .cap file.
 
         `method` choices:
           "airodump"  — targeted (needs ap_bssid + ap_channel in config)
           "besside"   — automatic sweep / single AP
-          "tcpdump"   — generic monitor-mode dump via tcpdump (no WPA targeting)
+          "tcpdump"   — generic monitor-mode dump (tcpdump on Linux/macOS, dumpcap -I on Windows)
         """
         section("Stage 1 - Monitor-Mode Capture")
 
-        if IS_WINDOWS:
-            err("Monitor-mode capture requires Linux/Kali or macOS. Use run() for Windows.")
+        if maybe_elevate_for_capture(interactive=interactive):
             return None
 
         if IS_MACOS:
@@ -528,7 +634,10 @@ class Capture:
         elif method == "airodump":
             cap_path = self._handshake.capture_airodump(mon_iface)
         elif method == "tcpdump":
-            cap_path = self._run_tcpdump_monitor(mon_iface)
+            if IS_WINDOWS:
+                cap_path = self._run_dumpcap_monitor_windows(mon_iface)
+            else:
+                cap_path = self._run_tcpdump_monitor(mon_iface)
         else:
             err(f"Unknown monitor capture method: {method}")
 
@@ -538,6 +647,36 @@ class Capture:
 
         ok(f"Raw 802.11 capture: {cap_path}")
         return cap_path
+
+    def _run_dumpcap_monitor_windows(self, interface: str) -> Optional[str]:
+        """
+        Windows generic monitor capture using dumpcap.
+        Requires Npcap monitor mode support and an adapter/driver that supports it.
+        """
+        dumpcap = _require("dumpcap")
+        if not dumpcap:
+            return None
+
+        out = self.output_dir / "monitor_raw.pcap"
+        duration = int(self.config.get("capture_duration", 60) or 60)
+
+        cmd = [dumpcap, "-I", "-i", interface, "-w", str(out), "-F", "pcap"]
+        if duration > 0:
+            cmd.extend(["-a", f"duration:{duration}"])
+
+        info(f"dumpcap monitor mode (-I) on {interface} for {duration}s â€¦")
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip()
+            err(f"dumpcap monitor capture failed: {stderr or 'unknown dumpcap error'}")
+            return None
+
+        if out.exists() and out.stat().st_size > 0:
+            ok(f"Monitor capture saved to {out}")
+            return str(out)
+
+        err("dumpcap monitor capture produced no output.")
+        return None
 
     def _run_tcpdump_monitor(self, mon_iface: str) -> Optional[str]:
         """
@@ -687,16 +826,17 @@ class Capture:
     # Convenience: full end-to-end wi-fi lab pipeline in one call
     # ------------------------------------------------------------------
 
-    def run_full_wifi_pipeline(self, method: str = "airodump") -> Optional[str]:
+    def run_full_wifi_pipeline(self, method: str = "airodump", interactive: bool = True) -> Optional[str]:
         """
         Convenience wrapper that runs the complete pipeline:
           enable monitor → capture → crack PSK → airdecap-ng → return decrypted pcap
 
+        On Windows, this uses aircrack-ng suite directly without airmon-ng.
         After this returns, pass the result into StreamExtractor.extract()
         and it will now see all IPv6, ICMP, SCTP, and third-party traffic
         because the Wi-Fi encryption has been stripped.
         """
-        cap = self.run_monitor(method=method)
+        cap = self.run_monitor(method=method, interactive=interactive)
         if not cap:
             self.disable_monitor()
             return None
