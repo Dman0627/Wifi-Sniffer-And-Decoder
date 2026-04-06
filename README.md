@@ -6,6 +6,26 @@
 
 Wi-Fi capture and analysis with a narrow, honest support matrix. The official product modes are Ubuntu standalone, Raspberry Pi OS standalone, and Windows 10/11 paired with Ubuntu or Raspberry Pi OS for remote capture.
 
+## New here
+
+If you want the easiest possible setup, start with `GETTING_STARTED.md`.
+
+That guide gives you:
+
+- the simplest path for Windows users
+- the simplest path for Ubuntu and Raspberry Pi OS users
+- a pcap-only path if you already have a capture file
+- exact copy-paste commands for first run and daily use
+
+Quick chooser:
+
+| If you are on | Best path | Start here |
+|---|---|---|
+| Windows 10/11 | Use another device running Ubuntu or Raspberry Pi OS for capture | `GETTING_STARTED.md` -> `Windows + remote capture` |
+| Ubuntu | Run everything on the same machine | `GETTING_STARTED.md` -> `Ubuntu standalone` |
+| Raspberry Pi OS | Run everything on the same machine, or use it as a capture appliance | `GETTING_STARTED.md` -> `Raspberry Pi OS standalone` |
+| Any supported machine with an existing `.pcap` or `.pcapng` | Skip live capture and analyze the file you already have | `GETTING_STARTED.md` -> `I already have a capture file` |
+
 ## What it does
 
 - Capture or import a pcap or pcapng
@@ -189,6 +209,8 @@ Recommended release-closeout order:
 4. only tag a release after the gate says `fully validated`
 
 ## Start here
+
+If you are brand new, read `GETTING_STARTED.md` first. The section below is the short version.
 
 Use the installer that matches the machine you are sitting at:
 

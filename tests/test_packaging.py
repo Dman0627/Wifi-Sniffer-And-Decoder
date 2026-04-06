@@ -48,6 +48,7 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     with zipfile.ZipFile(zip_path) as archive:
         members = set(archive.namelist())
     assert "CHANGELOG.md" in members
+    assert "GETTING_STARTED.md" in members
     assert "RELEASE_CHECKLIST.md" in members
     assert "README.md" in members
     assert "videopipeline.py" in members

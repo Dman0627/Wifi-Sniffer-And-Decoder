@@ -16,6 +16,7 @@ PORTABLE_NAME = f"wifi-sniffer-and-decoder-{__version__}-portable.zip"
 
 INCLUDE_PATHS = (
     "CHANGELOG.md",
+    "GETTING_STARTED.md",
     "RELEASE_CHECKLIST.md",
     "README.md",
     "pyproject.toml",
