@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "remote_path": "",
     "remote_port": 22,
     "remote_identity": "",
+    "remote_interface": "",
     "remote_dest_dir": "./pipeline_output/remote_imports",
     "remote_poll_interval": 8,
     # ── extraction ────────────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ def load_config(path: Optional[str] = None) -> Dict[str, object]:
     config.setdefault("deauth_count", 10)
     config.setdefault("hashcat_rules", "")
     config.setdefault("monitor_method", "airodump")
+    config.setdefault("remote_interface", "")
     if not config.get("replay_format_hint"):
         config["replay_format_hint"] = config.get("video_codec") or "raw"
     config.setdefault("corpus_review_threshold", 0.62)
@@ -249,6 +251,10 @@ def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
         config["remote_identity"] = ask(
             "SSH identity file (optional)",
             str(config.get("remote_identity") or ""),
+        )
+        config["remote_interface"] = ask(
+            "Remote capture interface (optional, for start-remote)",
+            str(config.get("remote_interface") or "wlan0"),
         )
         config["remote_dest_dir"] = ask(
             "Local import directory",

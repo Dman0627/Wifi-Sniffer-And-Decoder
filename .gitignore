@@ -4,3 +4,8 @@ __pycache__/
 pipeline_output/
 lab.json
 tmp_*/
+build/
+dist/
+*.egg-info/
+htmlcov/
+.coverage

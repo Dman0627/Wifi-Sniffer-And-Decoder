@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -14,10 +15,18 @@ from .corpus import CorpusStore
 from .environment import IS_MACOS, IS_WINDOWS, check_environment
 from .extract import StreamExtractor
 from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture
-from .remote import pull_remote_capture, watch_remote_capture
+from .remote import (
+    bootstrap_remote_host,
+    doctor_remote_host,
+    pair_remote_host,
+    pull_remote_capture,
+    remote_service_host,
+    start_remote_capture,
+    watch_remote_capture,
+)
 from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
-    ask, banner, choose, confirm, done, err, info, section, warn,
+    ask, ask_int, banner, choose, confirm, done, err, info, section, warn,
 )
 from .webapp import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, serve_dashboard
 
@@ -40,6 +49,10 @@ def _detection_report_path(config: Dict[str, object]) -> Path:
 
 def _capture_path(config: Dict[str, object]) -> Path:
     return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "raw_capture.pcapng"
+
+
+def _validation_report_path(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "validation_report.json"
 
 
 def _handshake_path(config: Dict[str, object]) -> Optional[Path]:
@@ -97,6 +110,439 @@ def _run_after_pull(config: Dict[str, object], pcap_path: str, mode: str) -> Non
         run_analyze(config, None)
     if mode in ("play", "all"):
         run_play(config)
+
+
+def run_pair_remote(
+    config: Dict[str, object],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+) -> bool:
+    return pair_remote_host(config, host=host, port=port, identity=identity)
+
+
+def run_bootstrap_remote(
+    config: Dict[str, object],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    remote_root: Optional[str] = None,
+    capture_dir: Optional[str] = None,
+    install_packages: bool = True,
+    pair: bool = True,
+) -> Optional[Dict[str, str]]:
+    return bootstrap_remote_host(
+        config,
+        host=host,
+        port=port,
+        identity=identity,
+        remote_root=remote_root,
+        capture_dir=capture_dir,
+        install_packages=install_packages,
+        pair=pair,
+    )
+
+
+def run_start_remote(
+    config: Dict[str, object],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    interface: Optional[str] = None,
+    duration: Optional[int] = None,
+    output: Optional[str] = None,
+    dest_dir: Optional[str] = None,
+    run_mode: str = "none",
+) -> Optional[str]:
+    pulled = start_remote_capture(
+        config,
+        host=host,
+        port=port,
+        identity=identity,
+        interface=interface,
+        duration=duration,
+        output=output,
+        dest_dir=dest_dir,
+    )
+    if pulled and run_mode != "none":
+        _run_after_pull(config, str(pulled), run_mode)
+    return str(pulled) if pulled else None
+
+
+def run_remote_service(
+    config: Dict[str, object],
+    action: str,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    interface: Optional[str] = None,
+    duration: Optional[int] = None,
+    output: Optional[str] = None,
+) -> bool:
+    result = remote_service_host(
+        config,
+        action,
+        host=host,
+        port=port,
+        identity=identity,
+        interface=interface,
+        duration=duration,
+        output=output,
+    )
+    return bool(result)
+
+
+def run_setup_remote(
+    config: Dict[str, object],
+    *,
+    config_path: Optional[str] = None,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    interface: Optional[str] = None,
+    dest_dir: Optional[str] = None,
+    duration: Optional[int] = None,
+    smoke_test: bool = False,
+) -> bool:
+    section("Windows Remote Setup")
+    if IS_WINDOWS:
+        info("This guided setup is optimized for the supported Windows controller workflow.")
+    else:
+        warn("This guided setup is Windows-first, but it can still prepare the supported remote capture path.")
+
+    resolved_host = (host if host is not None else ask("Remote host (user@host)", str(config.get("remote_host") or "pi@raspberrypi"))).strip()
+    if not resolved_host:
+        err("Remote host is required for setup.")
+        return False
+
+    resolved_port = int(port if port is not None else ask_int("Remote SSH port", int(config.get("remote_port", 22) or 22)))
+    resolved_identity = (
+        str(identity).strip()
+        if identity is not None
+        else ask("SSH identity file (optional)", str(config.get("remote_identity") or "")).strip()
+    )
+    resolved_interface = (
+        str(interface).strip()
+        if interface is not None
+        else ask("Remote capture interface", str(config.get("remote_interface") or "wlan0")).strip()
+    )
+    if not resolved_interface:
+        err("Remote capture interface is required for setup.")
+        return False
+
+    resolved_dest = (
+        str(dest_dir).strip()
+        if dest_dir is not None
+        else ask("Local import directory", str(config.get("remote_dest_dir") or "./pipeline_output/remote_imports")).strip()
+    )
+    resolved_duration = int(
+        duration if duration is not None else ask_int("Default remote capture duration in seconds", int(config.get("capture_duration", 60) or 60))
+    )
+    if resolved_duration <= 0:
+        warn("Default capture duration must be positive; using 60 seconds.")
+        resolved_duration = 60
+
+    config["remote_host"] = resolved_host
+    config["remote_port"] = resolved_port
+    config["remote_identity"] = resolved_identity
+    config["remote_interface"] = resolved_interface
+    config["remote_dest_dir"] = resolved_dest
+    config["capture_duration"] = resolved_duration
+
+    save_target = config_path or "lab.json"
+    save_config(config, save_target)
+    info("Running the supported first-run flow: pair -> bootstrap -> doctor.")
+    if not run_pair_remote(config, host=resolved_host, port=resolved_port, identity=resolved_identity or None):
+        return False
+
+    bootstrap_result = run_bootstrap_remote(
+        config,
+        host=resolved_host,
+        port=resolved_port,
+        identity=resolved_identity or None,
+        install_packages=True,
+        pair=False,
+    )
+    if not bootstrap_result:
+        return False
+
+    capture_dir = str(bootstrap_result.get("capture_dir") or "").strip()
+    if capture_dir:
+        config["remote_path"] = capture_dir.rstrip("/") + "/"
+    save_config(config, save_target)
+
+    doctor_ok = run_doctor(
+        config,
+        host=resolved_host,
+        port=resolved_port,
+        identity=resolved_identity or None,
+        interface=resolved_interface,
+    )
+    if not doctor_ok:
+        warn("Setup saved your config, but doctor still found issues.")
+        return False
+
+    if smoke_test:
+        smoke_duration = min(max(5, resolved_duration), 15)
+        info(f"Running a short smoke capture ({smoke_duration}s) to validate the full remote path.")
+        if not run_start_remote(
+            config,
+            host=resolved_host,
+            port=resolved_port,
+            identity=resolved_identity or None,
+            interface=resolved_interface,
+            duration=smoke_duration,
+            run_mode="none",
+        ):
+            warn("Setup completed, but the smoke capture did not finish cleanly.")
+            return False
+
+    done("Windows remote setup complete.")
+    info(r"Next run: .\run_remote.ps1 -Host %s -Interface %s -DoctorFirst" % (resolved_host, resolved_interface))
+    return True
+
+
+def _print_remote_doctor(report: Dict[str, object]) -> None:
+    section("Remote Doctor")
+    local = dict(report.get("local") or {})
+    remote = dict(report.get("remote") or {})
+    host = str(report.get("host") or "(unset)")
+
+    print(f"  {BOLD}Target{RESET}")
+    print(f"    Host             : {host}")
+
+    print(f"\n  {BOLD}Local SSH Prereqs{RESET}")
+    print(f"    ssh              : {_status_label(bool(local.get('ssh')), 'ready')}")
+    if local.get("ssh_path"):
+        print(f"    ssh path         : {local.get('ssh_path')}")
+    print(f"    scp              : {_status_label(bool(local.get('scp')), 'ready')}")
+    if local.get("scp_path"):
+        print(f"    scp path         : {local.get('scp_path')}")
+    public_key_ok = bool(local.get("public_key"))
+    print(f"    Public key       : {_status_label(public_key_ok, 'present', 'not found')}")
+    if local.get("public_key_path"):
+        print(f"    Public key path  : {local.get('public_key_path')}")
+
+    print(f"\n  {BOLD}Remote Setup{RESET}")
+    print(f"    Reachable        : {_status_label(bool(remote.get('reachable')), 'yes', 'no')}")
+    if remote.get("home"):
+        print(f"    Home             : {remote.get('home')}")
+    print(f"    tcpdump          : {_status_label(bool(remote.get('tcpdump')), 'present', 'missing')}")
+    print(f"    Helper           : {_status_label(bool(remote.get('helper')), 'present', 'missing')}")
+    if remote.get("helper_path"):
+        print(f"    Helper path      : {remote.get('helper_path')}")
+    service_state = str(remote.get("service_status") or "missing")
+    if service_state == "running":
+        service_label = f"{YELLOW}running{RESET}"
+    elif service_state == "idle":
+        service_label = _status_label(True, "ready")
+    elif service_state == "failed":
+        service_label = _status_label(False, "ready", "failed")
+    else:
+        service_label = _status_label(False, "ready", "missing")
+    print(f"    Service          : {_status_label(bool(remote.get('service')), 'present', 'missing')}")
+    print(f"    Service status   : {service_label}")
+    if remote.get("service_path"):
+        print(f"    Service path     : {remote.get('service_path')}")
+    state_dir = str(remote.get("state_dir") or "")
+    print(f"    State dir        : {_status_label(bool(remote.get('state_dir_exists')), 'present', 'missing')}")
+    if state_dir:
+        print(f"    State dir path   : {state_dir}")
+    print(f"    State writable   : {_status_label(bool(remote.get('state_dir_writable')), 'yes', 'no')}")
+    privilege_mode = str(remote.get("privilege_mode") or "fallback")
+    privilege_ready = privilege_mode in ("sudoers_runner", "root_session")
+    if privilege_mode == "sudoers_runner":
+        privilege_label = _status_label(True, "hardened")
+    elif privilege_mode == "root_session":
+        privilege_label = f"{YELLOW}root session only{RESET}"
+    else:
+        privilege_label = _status_label(False, "hardened", "fallback")
+    print(f"    Privilege mode   : {privilege_label}")
+    print(f"    Privileged runner: {_status_label(bool(remote.get('privileged_runner')), 'present', 'missing')}")
+    if remote.get("privileged_runner_path"):
+        print(f"    Runner path      : {remote.get('privileged_runner_path')}")
+    capture_dir = str(remote.get("capture_dir") or "")
+    print(f"    Capture dir      : {_status_label(bool(remote.get('capture_dir_exists')), 'present', 'missing')}")
+    if capture_dir:
+        print(f"    Capture dir path : {capture_dir}")
+    print(f"    Capture writable : {_status_label(bool(remote.get('capture_dir_writable')), 'yes', 'no')}")
+    has_last_capture = bool(remote.get("remote_size_bytes")) or bool(remote.get("checksum_value"))
+    if has_last_capture:
+        print(f"    Last marker      : {_status_label(bool(remote.get('complete_marker')), 'present', 'missing')}")
+        print(f"    Last checksum    : {_status_label(bool(remote.get('checksum_file')), 'present', 'missing')}")
+        if remote.get("remote_size_bytes"):
+            print(f"    Last size        : {remote.get('remote_size_bytes')} bytes")
+    interface_name = str(remote.get("interface") or "").strip()
+    if interface_name:
+        interface_exists = remote.get("interface_exists")
+        if interface_exists is True:
+            label = _status_label(True, "present")
+        elif interface_exists is False:
+            label = _status_label(False, "present", "missing")
+        else:
+            label = f"{YELLOW}unknown{RESET}"
+        print(f"    Interface        : {interface_name} ({label})")
+    if not privilege_ready:
+        print(f"    Next step        : re-run bootstrap-remote with a remote user that has sudo access")
+
+
+def run_doctor(
+    config: Dict[str, object],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    interface: Optional[str] = None,
+) -> bool:
+    section("Doctor")
+    local_ok = check_environment()
+    remote_host = host or str(config.get("remote_host") or "").strip() or None
+    if not remote_host:
+        info("No remote host configured. Skipping remote doctor checks.")
+        return local_ok
+
+    report = doctor_remote_host(
+        config,
+        host=remote_host,
+        port=port,
+        identity=identity,
+        interface=interface,
+    )
+    _print_remote_doctor(report)
+    if report.get("ok"):
+        done("Doctor checks passed.")
+    else:
+        warn("Doctor found issues. Fix the missing items above and re-run.")
+    return bool(local_ok and report.get("ok"))
+
+
+def run_validate_remote(
+    config: Dict[str, object],
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    identity: Optional[str] = None,
+    interface: Optional[str] = None,
+    duration: Optional[int] = None,
+    dest_dir: Optional[str] = None,
+    report_path: Optional[str] = None,
+    skip_smoke: bool = False,
+) -> bool:
+    section("Supported Validation")
+    target_host = host or str(config.get("remote_host") or "").strip() or None
+    target_interface = interface or str(config.get("remote_interface") or "").strip() or None
+    target_duration = int(duration if duration is not None else min(max(int(config.get("capture_duration", 60) or 60), 10), 30))
+    report_file = Path(report_path).resolve() if report_path else _validation_report_path(config)
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    validation: Dict[str, object] = {
+        "schema_version": 1,
+        "validated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "supported_target": "Windows controller/analyzer + Raspberry Pi OS or Ubuntu capture device",
+        "inputs": {
+            "host": target_host or "",
+            "port": int(port if port is not None else config.get("remote_port", 22) or 22),
+            "interface": target_interface or "",
+            "duration": target_duration,
+            "dest_dir": str(dest_dir or config.get("remote_dest_dir") or "./pipeline_output/remote_imports"),
+            "skip_smoke": bool(skip_smoke),
+        },
+        "environment_ok": False,
+        "doctor": {},
+        "service_status_before": {},
+        "smoke_capture": {
+            "requested": not skip_smoke,
+            "success": False,
+            "local_capture_path": "",
+            "size_bytes": 0,
+        },
+        "service_status_after": {},
+        "last_capture_after": {},
+        "overall_ok": False,
+    }
+
+    env_ok = check_environment()
+    validation["environment_ok"] = env_ok
+
+    doctor_report = doctor_remote_host(
+        config,
+        host=target_host,
+        port=port,
+        identity=identity,
+        interface=target_interface,
+    )
+    validation["doctor"] = doctor_report
+    if target_host:
+        _print_remote_doctor(doctor_report)
+
+    before_status = remote_service_host(
+        config,
+        "status",
+        host=target_host,
+        port=port,
+        identity=identity,
+    )
+    validation["service_status_before"] = before_status or {}
+
+    smoke_success = True
+    if not skip_smoke:
+        if not target_host or not target_interface:
+            warn("Skipping smoke validation because remote host or interface is not configured.")
+            smoke_success = False
+        else:
+            pulled = start_remote_capture(
+                config,
+                host=target_host,
+                port=port,
+                identity=identity,
+                interface=target_interface,
+                duration=target_duration,
+                dest_dir=dest_dir,
+            )
+            if pulled:
+                pulled_path = Path(pulled)
+                validation["smoke_capture"] = {
+                    "requested": True,
+                    "success": True,
+                    "local_capture_path": str(pulled_path),
+                    "size_bytes": pulled_path.stat().st_size if pulled_path.exists() else 0,
+                }
+            else:
+                smoke_success = False
+                validation["smoke_capture"] = {
+                    "requested": True,
+                    "success": False,
+                    "local_capture_path": "",
+                    "size_bytes": 0,
+                }
+
+    after_status = remote_service_host(
+        config,
+        "status",
+        host=target_host,
+        port=port,
+        identity=identity,
+    )
+    validation["service_status_after"] = after_status or {}
+
+    last_capture = remote_service_host(
+        config,
+        "last-capture",
+        host=target_host,
+        port=port,
+        identity=identity,
+    )
+    validation["last_capture_after"] = last_capture or {}
+
+    overall_ok = bool(env_ok and doctor_report.get("ok") and smoke_success)
+    validation["overall_ok"] = overall_ok
+
+    with open(report_file, "w", encoding="utf-8") as handle:
+        json.dump(validation, handle, indent=2)
+
+    if overall_ok:
+        done(f"Supported validation passed. Report saved to {report_file}")
+    else:
+        warn(f"Supported validation found issues. Report saved to {report_file}")
+    return overall_ok
 
 
 # ---------------------------------------------------------------------------
@@ -462,35 +908,64 @@ def interactive_menu(config: Dict[str, object]) -> int:
         has_candidate = bool(report and report.get("candidate_material"))
         options = [
             "Guided setup / configure device",                    # 0
-            "Capture traffic (dumpcap / tcpdump fallback)",       # 1
-            "Pull remote capture (SSH/SCP)",                      # 2
-            "Monitor mode capture (airodump/besside/tcpdump)",   # 3
-            "Crack WPA2 + decrypt pcap",                          # 4
-            "Strip Wi-Fi layer on an existing pcap",              # 5
-            "Extract payload streams from a pcap",                # 6
-            "Run payload detection",                              # 7
-            "Review candidate payloads",                          # 8
-            "Pin a preferred candidate stream",                   # 9
-            "Edit custom stream hints",                           # 10
-            "Run cipher heuristics",                              # 11
-            "Start experimental replay / reconstruction",         # 12
-            "Run full pipeline (dumpcap / tcpdump capture)",      # 13
-            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 14
-            "Show latest report summary",                         # 15
-            "Show corpus archive",                                # 16
-            "Launch web dashboard",                               # 17
-            "Check environment",                                  # 18
-            "Exit",                                               # 19
+            "Windows remote setup wizard",                        # 1
+            "Capture traffic (dumpcap / tcpdump fallback)",       # 2
+            "Pair remote capture device (SSH key install)",       # 3
+            "Bootstrap remote capture device",                    # 4
+            "Start remote capture, pull, and process",            # 5
+            "Pull remote capture (SSH/SCP)",                      # 6
+            "Monitor mode capture (airodump/besside/tcpdump)",   # 7
+            "Crack WPA2 + decrypt pcap",                          # 8
+            "Strip Wi-Fi layer on an existing pcap",              # 9
+            "Extract payload streams from a pcap",                # 10
+            "Run payload detection",                              # 11
+            "Review candidate payloads",                          # 12
+            "Pin a preferred candidate stream",                   # 13
+            "Edit custom stream hints",                           # 14
+            "Run cipher heuristics",                              # 15
+            "Start experimental replay / reconstruction",         # 16
+            "Run full pipeline (dumpcap / tcpdump capture)",      # 17
+            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 18
+            "Show latest report summary",                         # 19
+            "Show corpus archive",                                # 20
+            "Launch web dashboard",                               # 21
+            "Run doctor",                                         # 22
+            "Run supported validation",                           # 23
+            "Exit",                                               # 24
         ]
-        default = 12 if has_candidate else (1 if IS_WINDOWS else 3)
+        default = 1 if IS_WINDOWS and not str(config.get("remote_host") or "").strip() else (16 if has_candidate else (2 if IS_WINDOWS else 7))
         selection = choose("Select an action", options, default=default)
 
         if selection == 0:
             config = interactive_config(config)
         elif selection == 1:
+            run_setup_remote(config)
+        elif selection == 2:
             strip_wifi = confirm("Run Wi-Fi layer strip after capture?", default=bool(resolve_wpa_password(config)))
             run_capture(config, strip_wifi=strip_wifi)
-        elif selection == 2:
+        elif selection == 3:
+            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+            identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
+            run_pair_remote(config, host=host, identity=identity)
+        elif selection == 4:
+            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+            identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
+            install_packages = confirm("Install capture-side packages when possible?", default=True)
+            run_bootstrap_remote(config, host=host, identity=identity, install_packages=install_packages)
+        elif selection == 5:
+            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+            interface = ask("Remote interface", str(config.get("remote_interface") or "wlan0"))
+            duration_text = ask("Capture duration in seconds", str(config.get("capture_duration") or 60))
+            try:
+                duration = max(1, int(duration_text))
+            except ValueError:
+                warn(f"Invalid duration {duration_text!r}; using 60.")
+                duration = 60
+            run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
+            if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
+                run_mode = "none"
+            run_start_remote(config, host=host, interface=interface, duration=duration, run_mode=run_mode)
+        elif selection == 6:
             host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
             path = ask("Remote path (file or directory)", str(config.get("remote_path") or ""))
             latest_only = confirm("Pull latest file from a directory/pattern?", default=True)
@@ -500,48 +975,58 @@ def interactive_menu(config: Dict[str, object]) -> int:
             pulled = pull_remote_capture(config, host=host, path=path, latest_only=latest_only)
             if pulled and run_mode != "none":
                 _run_after_pull(config, str(pulled), run_mode)
-        elif selection == 3:
+        elif selection == 7:
             method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
             run_monitor(config, method=method)
-        elif selection == 4:
+        elif selection == 8:
             cap = ask("Path to handshake .cap (blank = auto-detect)", "").strip() or None
             run_crack_decrypt(config, handshake_cap=cap)
-        elif selection == 5:
+        elif selection == 9:
             source = input("  > Path to existing pcap: ").strip()
             if source:
                 Capture(config).strip_wifi_layer(source)
-        elif selection == 6:
+        elif selection == 10:
             source = ask("Path to pcap (blank = auto)", "").strip() or None
             run_extract(config, source)
-        elif selection == 7:
-            run_detect(config)
-        elif selection == 8:
-            _show_candidate_streams(config)
-        elif selection == 9:
-            config = _pick_preferred_stream(config)
-        elif selection == 10:
-            config = _edit_device_hints(config)
         elif selection == 11:
+            run_detect(config)
+        elif selection == 12:
+            _show_candidate_streams(config)
+        elif selection == 13:
+            config = _pick_preferred_stream(config)
+        elif selection == 14:
+            config = _edit_device_hints(config)
+        elif selection == 15:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             run_analyze(config, decrypted)
-        elif selection == 12:
+        elif selection == 16:
             run_play(config)
-        elif selection == 13:
+        elif selection == 17:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             strip_wifi = confirm("Strip the Wi-Fi layer when possible?", default=bool(resolve_wpa_password(config)))
             run_all(config, None, decrypted, strip_wifi)
-        elif selection == 14:
+        elif selection == 18:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
             run_all_wifi(config, decrypted_dir=decrypted, method=method)
-        elif selection == 15:
+        elif selection == 19:
             _show_report_summary(config)
-        elif selection == 16:
+        elif selection == 20:
             _show_corpus_summary(config)
-        elif selection == 17:
+        elif selection == 21:
             serve_dashboard()
-        elif selection == 18:
-            check_environment()
+        elif selection == 22:
+            run_doctor(
+                config,
+                host=str(config.get("remote_host") or "").strip() or None,
+                interface=str(config.get("remote_interface") or "").strip() or None,
+            )
+        elif selection == 23:
+            run_validate_remote(
+                config,
+                host=str(config.get("remote_host") or "").strip() or None,
+                interface=str(config.get("remote_interface") or "").strip() or None,
+            )
         else:
             info("Goodbye.")
             return 0
@@ -555,7 +1040,7 @@ def interactive_menu(config: Dict[str, object]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="WiFi payload pipeline — cross-platform capture/import + optional Wi-Fi lab helpers."
+        description="WiFi payload pipeline — supported path: Windows controller/analyzer plus Raspberry Pi OS or Ubuntu remote capture."
     )
     parser.add_argument("--config", default=None, help="Path to a JSON config file")
     parser.add_argument("--stage", default=None, help=argparse.SUPPRESS)
@@ -564,15 +1049,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("menu", help="Open the guided dashboard interface")
+    subparsers.add_parser("menu", help="Open the guided dashboard interface (recommended: Windows controller + remote capture)")
     subparsers.add_parser("config", help="Launch interactive configuration")
 
     # ── Standard capture (all platforms) ─────────────────────────────────────
-    capture_p = subparsers.add_parser("capture", help="Capture traffic into a pcap (dumpcap, or tcpdump fallback)")
+    capture_p = subparsers.add_parser("capture", help="Local capture into a pcap (supported mainly for Linux/macOS or imported pcaps; experimental for Windows Wi-Fi)")
     capture_p.add_argument("--strip-wifi", action="store_true", help="Run airdecap-ng after capture")
 
     # ── Monitor mode (Linux/macOS, Windows when supported) ────────────────────
-    monitor_p = subparsers.add_parser("monitor", help="Enable monitor mode and capture raw 802.11 frames (Linux/macOS, Windows when supported)")
+    monitor_p = subparsers.add_parser("monitor", help="Experimental local monitor-mode capture (preferred product path is remote Raspberry Pi OS/Ubuntu capture)")
     monitor_p.add_argument(
         "--method",
         default=None,
@@ -585,7 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
     crack_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
 
     # ── Remote capture pull (SSH/SCP) ────────────────────────────────────────
-    remote_p = subparsers.add_parser("remote", help="Pull a capture from a remote device over SSH/SCP")
+    remote_p = subparsers.add_parser("remote", help="Pull a capture from a supported remote capture device over SSH/SCP")
     remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
     remote_p.add_argument("--path", default=None, help="Remote file path or directory")
     remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
@@ -595,6 +1080,58 @@ def build_parser() -> argparse.ArgumentParser:
     remote_p.add_argument("--watch", action="store_true", help="Keep pulling on an interval")
     remote_p.add_argument("--interval", default=None, type=int, help="Watch interval in seconds")
     remote_p.add_argument("--run", default="none", choices=["none", "extract", "detect", "analyze", "play", "all"], help="Run stages after pull")
+
+    pair_p = subparsers.add_parser("pair-remote", help="Install your SSH public key on a supported remote Raspberry Pi OS/Ubuntu capture device")
+    pair_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    pair_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    pair_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+
+    bootstrap_p = subparsers.add_parser("bootstrap-remote", help="Prepare a supported Raspberry Pi OS/Ubuntu capture device over SSH")
+    bootstrap_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    bootstrap_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    bootstrap_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    bootstrap_p.add_argument("--remote-root", default=None, help="Remote install root (default: $HOME/wifi-pipeline)")
+    bootstrap_p.add_argument("--capture-dir", default=None, help="Remote capture directory (default: <remote-root>/captures)")
+    bootstrap_p.add_argument("--skip-packages", action="store_true", help="Do not install capture-side packages")
+    bootstrap_p.add_argument("--skip-pair", action="store_true", help="Skip SSH key pairing before bootstrap")
+
+    setup_remote_p = subparsers.add_parser("setup-remote", help="Run the guided first-run Windows setup flow for the supported remote capture path")
+    setup_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    setup_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    setup_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    setup_remote_p.add_argument("--interface", default=None, help="Remote capture interface, for example wlan0")
+    setup_remote_p.add_argument("--duration", default=None, type=int, help="Default capture duration in seconds")
+    setup_remote_p.add_argument("--dest", default=None, help="Local destination directory")
+    setup_remote_p.add_argument("--smoke-test", action="store_true", help="Run a short remote smoke capture after setup")
+
+    start_remote_p = subparsers.add_parser("start-remote", help="Run the supported timed remote capture flow, pull it back, and optionally process it")
+    start_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    start_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    start_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    start_remote_p.add_argument("--interface", default=None, help="Remote capture interface, for example wlan0")
+    start_remote_p.add_argument("--duration", default=None, type=int, help="Capture duration in seconds")
+    start_remote_p.add_argument("--output", default=None, help="Remote output path (optional)")
+    start_remote_p.add_argument("--dest", default=None, help="Local destination directory")
+    start_remote_p.add_argument("--run", default="all", choices=["none", "extract", "detect", "analyze", "play", "all"], help="Run stages after pull")
+
+    service_remote_p = subparsers.add_parser("remote-service", help="Control the managed remote capture appliance helper")
+    service_remote_p.add_argument("action", choices=["start", "stop", "status", "last-capture"])
+    service_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    service_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    service_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    service_remote_p.add_argument("--interface", default=None, help="Remote capture interface for start")
+    service_remote_p.add_argument("--duration", default=None, type=int, help="Capture duration in seconds for start")
+    service_remote_p.add_argument("--output", default=None, help="Remote output path for start")
+
+    validate_remote_p = subparsers.add_parser("validate-remote", help="Run the supported hardware-validation flow and write a validation report")
+    validate_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    validate_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    validate_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    validate_remote_p.add_argument("--interface", default=None, help="Remote capture interface, for example wlan0")
+    validate_remote_p.add_argument("--duration", default=None, type=int, help="Smoke-capture duration in seconds")
+    validate_remote_p.add_argument("--dest", default=None, help="Local destination directory for the smoke capture")
+    validate_remote_p.add_argument("--report", default=None, help="Path to save the JSON validation report")
+    validate_remote_p.add_argument("--skip-smoke", action="store_true", help="Run readiness checks only and skip the smoke capture")
 
     # ── Full Wi-Fi pipeline ──────────────────────────────────────────────────
     wifi_p = subparsers.add_parser(
@@ -622,7 +1159,13 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--port", default=DEFAULT_WEB_PORT, type=int)
     web_p.add_argument("--no-browser", action="store_true")
 
-    subparsers.add_parser("deps", help="Check the native environment (Windows, Linux, or macOS)")
+    subparsers.add_parser("deps", help="Check the environment, supported workflow target, and explicit product limits")
+
+    doctor_p = subparsers.add_parser("doctor", help="Check local tools and optional remote capture setup")
+    doctor_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    doctor_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    doctor_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
+    doctor_p.add_argument("--interface", default=None, help="Remote capture interface to verify")
 
     all_p = subparsers.add_parser("all", help="Run capture/extract/detect/analyze in sequence (all platforms)")
     all_p.add_argument("--pcap", required=False, help="Skip capture and use an existing pcap/pcapng file")
@@ -662,6 +1205,15 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.command == "deps":
         return 0 if check_environment() else 1
+
+    if args.command == "doctor":
+        return 0 if run_doctor(
+            config,
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            interface=getattr(args, "interface", None),
+        ) else 1
 
     if args.command == "menu":
         return interactive_menu(config)
@@ -720,6 +1272,83 @@ def main(argv: Optional[list] = None) -> int:
         if pulled and getattr(args, "run", "none") != "none":
             _run_after_pull(config, str(pulled), str(getattr(args, "run", "none")))
         return 0 if pulled else 1
+
+    if args.command == "pair-remote":
+        paired = run_pair_remote(
+            config,
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+        )
+        return 0 if paired else 1
+
+    if args.command == "bootstrap-remote":
+        result = run_bootstrap_remote(
+            config,
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            remote_root=getattr(args, "remote_root", None),
+            capture_dir=getattr(args, "capture_dir", None),
+            install_packages=not bool(getattr(args, "skip_packages", False)),
+            pair=not bool(getattr(args, "skip_pair", False)),
+        )
+        return 0 if result else 1
+
+    if args.command == "setup-remote":
+        result = run_setup_remote(
+            config,
+            config_path=getattr(args, "config", None),
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            interface=getattr(args, "interface", None),
+            dest_dir=getattr(args, "dest", None),
+            duration=getattr(args, "duration", None),
+            smoke_test=bool(getattr(args, "smoke_test", False)),
+        )
+        return 0 if result else 1
+
+    if args.command == "start-remote":
+        result = run_start_remote(
+            config,
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            interface=getattr(args, "interface", None),
+            duration=getattr(args, "duration", None),
+            output=getattr(args, "output", None),
+            dest_dir=getattr(args, "dest", None),
+            run_mode=str(getattr(args, "run", "all")),
+        )
+        return 0 if result else 1
+
+    if args.command == "remote-service":
+        result = run_remote_service(
+            config,
+            action=str(getattr(args, "action", "status")),
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            interface=getattr(args, "interface", None),
+            duration=getattr(args, "duration", None),
+            output=getattr(args, "output", None),
+        )
+        return 0 if result else 1
+
+    if args.command == "validate-remote":
+        result = run_validate_remote(
+            config,
+            host=getattr(args, "host", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            interface=getattr(args, "interface", None),
+            duration=getattr(args, "duration", None),
+            dest_dir=getattr(args, "dest", None),
+            report_path=getattr(args, "report", None),
+            skip_smoke=bool(getattr(args, "skip_smoke", False)),
+        )
+        return 0 if result else 1
 
     if args.command == "extract":
         run_extract(config, getattr(args, "pcap", None))

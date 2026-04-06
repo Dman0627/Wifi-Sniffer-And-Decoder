@@ -155,6 +155,20 @@ def check_environment() -> bool:
         else:
             warn("Root (sudo) is required for monitor mode and raw socket capture on Linux/macOS.")
 
+    if IS_WINDOWS:
+        info("Supported workflow: use Windows as the controller/analyzer and Raspberry Pi OS or Ubuntu as the remote capture device.")
+        info("Native Windows monitor-mode and Wi-Fi lab capture remain experimental and adapter-dependent.")
+        warn("Unsupported as a guaranteed product path: adapter-independent Windows 802.11 monitor/injection parity with Linux.")
+    elif IS_LINUX:
+        info("Supported Linux role: Raspberry Pi OS or Ubuntu remote capture device controlled from Windows.")
+        warn("Other Linux distributions may work, but Raspberry Pi OS and Ubuntu are the supported appliance targets.")
+        warn("Raw capture still requires root or capture capabilities even on the supported Linux path.")
+    elif IS_MACOS:
+        info("macOS support remains experimental; the primary supported capture path is Raspberry Pi OS or Ubuntu.")
+        warn("macOS is not a supported capture appliance target for the primary workflow.")
+
+    info("Long-term limit: replay, payload decoding, and reconstruction remain heuristic and are not guaranteed.")
+
     return all_required
 
 
