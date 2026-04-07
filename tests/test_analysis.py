@@ -187,3 +187,6 @@ def test_crypto_analyzer_report_includes_protocol_support(tmp_path) -> None:
     assert report["selected_candidate_stream"]["stream_id"] == "stream-image"
     assert report["selected_protocol_support"]["dominant_unit_type"] == "png_image"
     assert report["selected_protocol_support"]["replay_level"] == "guaranteed"
+    assert report["selected_replay_confidence"]["handler_id"] == "png"
+    assert report["selected_replay_confidence"]["confidence_label"] == "guaranteed_export"
+    assert report["selected_replay_confidence"]["candidate_material_ready"] is False

@@ -8,10 +8,23 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+try:
+    from scapy.layers.dot11 import Dot11, Dot11EltRSN, PMKIDListPacket
+    from scapy.layers.eap import EAPOL, EAPOL_KEY
+    from scapy.utils import PcapReader
+except Exception:  # pragma: no cover - scapy is an expected dependency, but keep capture import-safe
+    Dot11 = None
+    Dot11EltRSN = None
+    PMKIDListPacket = None
+    EAPOL = None
+    EAPOL_KEY = None
+    PcapReader = None
 
 from .config import resolve_wpa_password
 from .environment import IS_MACOS, IS_WINDOWS, maybe_elevate_for_capture
+from .reasons import Reason, make_blocker, make_context, make_limitation
 from .ui import done, err, info, ok, section, warn
 
 
@@ -42,13 +55,446 @@ class WPACrackReadiness:
     state: str
     status: str
     handshake_cap: Optional[str]
+    handshake_artifact: str
     crack_ready: bool
     decrypt_ready: bool
     summary: str
     detail: str
+    reasons: Tuple[Reason, ...] = ()
+    next_steps: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WPAArtifactInspection:
+    kind: str
+    detail: str
+    eapol_count: int = 0
+    pmkid_count: int = 0
+    message_numbers: Tuple[int, ...] = ()
+    reasons: Tuple[Reason, ...] = ()
 
 
 _MIN_HANDSHAKE_BYTES = 1024
+_BSSID_RE = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
+_CHANNEL_RE = re.compile(r"^\d+(?:,\d+)*$")
+
+
+def _eapol_key_message_number(key: object) -> Optional[int]:
+    key_type = int(getattr(key, "key_type", 0) or 0)
+    if key_type not in (0, 1):
+        return None
+
+    key_ack = bool(getattr(key, "key_ack", 0))
+    has_key_mic = bool(getattr(key, "has_key_mic", 0))
+    secure = bool(getattr(key, "secure", 0))
+    install = bool(getattr(key, "install", 0))
+
+    if key_ack and not has_key_mic:
+        return 1
+    if not key_ack and has_key_mic and secure:
+        return 4
+    if not key_ack and has_key_mic:
+        return 2
+    if key_ack and has_key_mic and (install or secure):
+        return 3
+    if key_ack and has_key_mic:
+        return 3
+    return None
+
+
+def _packet_pmkid_count(packet: object) -> int:
+    count = 0
+    if PMKIDListPacket and packet.haslayer(PMKIDListPacket):
+        pmkid_layer = packet[PMKIDListPacket]
+        count += len(getattr(pmkid_layer, "pmkid_list", ()) or ())
+    if count:
+        return count
+    if Dot11EltRSN and packet.haslayer(Dot11EltRSN):
+        rsn = packet[Dot11EltRSN]
+        pmkids = getattr(rsn, "pmkids", None)
+        if pmkids is not None:
+            return len(getattr(pmkids, "pmkid_list", ()) or ())
+    return 0
+
+
+def _inspect_wpa_artifact(cap_path: Path) -> WPAArtifactInspection:
+    size_bytes = cap_path.stat().st_size
+    parse_error = ""
+    eapol_count = 0
+    pmkid_count = 0
+    messages: set[int] = set()
+
+    if PcapReader and EAPOL:
+        try:
+            with PcapReader(str(cap_path)) as reader:
+                for packet in reader:
+                    if EAPOL_KEY and packet.haslayer(EAPOL_KEY):
+                        eapol_count += 1
+                        message_number = _eapol_key_message_number(packet[EAPOL_KEY])
+                        if message_number is not None:
+                            messages.add(message_number)
+                    elif packet.haslayer(EAPOL):
+                        eapol_count += 1
+                    pmkid_count += _packet_pmkid_count(packet)
+        except Exception as exc:
+            parse_error = str(exc)
+
+    message_numbers = tuple(sorted(messages))
+    has_ap_message = bool(messages.intersection({1, 3}))
+    has_client_message = bool(messages.intersection({2, 4}))
+    if eapol_count and has_ap_message and has_client_message:
+        detail = f"Detected {eapol_count} EAPOL key frames across messages {', '.join(str(number) for number in message_numbers)}."
+        return WPAArtifactInspection(
+            kind="valid_handshake",
+            detail=detail,
+            eapol_count=eapol_count,
+            pmkid_count=pmkid_count,
+            message_numbers=message_numbers,
+            reasons=(
+                make_context(
+                    "wpa.handshake_valid",
+                    "A valid WPA handshake appears to be present in the capture.",
+                    detail=detail,
+                ),
+            ),
+        )
+
+    if pmkid_count and not eapol_count:
+        detail = f"Detected {pmkid_count} PMKID candidate{'s' if pmkid_count != 1 else ''}, but no usable EAPOL handshake frames."
+        return WPAArtifactInspection(
+            kind="pmkid_only",
+            detail=detail,
+            eapol_count=eapol_count,
+            pmkid_count=pmkid_count,
+            message_numbers=message_numbers,
+            reasons=(
+                make_limitation(
+                    "wpa.pmkid_only",
+                    "The capture only contains PMKID evidence.",
+                    detail=detail,
+                    remediation="Capture a fuller WPA handshake, or extend the crack path before treating PMKID-only captures as supported.",
+                ),
+            ),
+        )
+
+    if eapol_count:
+        detail = (
+            f"Detected {eapol_count} EAPOL frame{'s' if eapol_count != 1 else ''}, "
+            f"but only partial handshake evidence ({', '.join(str(number) for number in message_numbers) or 'unclassified messages'}) is present."
+        )
+        return WPAArtifactInspection(
+            kind="partial_handshake",
+            detail=detail,
+            eapol_count=eapol_count,
+            pmkid_count=pmkid_count,
+            message_numbers=message_numbers,
+            reasons=(
+                make_blocker(
+                    "wpa.handshake_partial",
+                    "Only a partial WPA handshake is present.",
+                    detail=detail,
+                    remediation="Re-capture until both AP and client handshake messages are visible.",
+                ),
+            ),
+        )
+
+    if size_bytes < _MIN_HANDSHAKE_BYTES:
+        detail = f"{cap_path.name} is only {size_bytes} bytes and does not contain a usable WPA artifact."
+        return WPAArtifactInspection(
+            kind="insufficient_capture",
+            detail=detail,
+            reasons=(
+                make_blocker(
+                    "wpa.handshake_too_small",
+                    "The handshake artifact is too small to trust.",
+                    detail=f"{cap_path.name} is only {size_bytes} bytes.",
+                    remediation="Re-capture a fuller handshake before attempting WPA recovery.",
+                ),
+                make_blocker(
+                    "wpa.capture_insufficient",
+                    "The capture is too small and contains no usable WPA artifact.",
+                    detail=detail,
+                    remediation="Re-capture the target AP until EAPOL or PMKID evidence is present.",
+                ),
+            ),
+        )
+
+    detail = "The capture does not contain a usable WPA handshake or PMKID artifact."
+    if parse_error:
+        detail += f" Packet parsing failed while inspecting the capture: {parse_error}."
+    return WPAArtifactInspection(
+        kind="no_usable_artifact",
+        detail=detail,
+        reasons=(
+            make_blocker(
+                "wpa.no_usable_artifact",
+                "The capture does not contain a usable WPA artifact.",
+                detail=detail,
+                remediation="Capture targeted WPA traffic until a full handshake or PMKID is present.",
+            ),
+        ),
+    )
+
+
+def _artifact_supports_crack_readiness(kind: str) -> bool:
+    return kind == "valid_handshake"
+
+
+def _artifact_supports_decrypt_readiness(kind: str) -> bool:
+    return kind == "valid_handshake"
+
+
+def _dedupe_reasons(*groups: Tuple[Reason, ...] | List[Reason]) -> Tuple[Reason, ...]:
+    merged: List[Reason] = []
+    seen: set[str] = set()
+    for group in groups:
+        for reason in group:
+            if reason.code in seen:
+                continue
+            seen.add(reason.code)
+            merged.append(reason)
+    return tuple(merged)
+
+
+def _dedupe_steps(*groups: Tuple[str, ...] | List[str]) -> Tuple[str, ...]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for step in group:
+            text = str(step or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return tuple(merged)
+
+
+def _guided_wpa_next_steps(
+    state: str,
+    artifact_kind: str,
+    reasons: Tuple[Reason, ...],
+    *,
+    crack_ready: bool,
+    decrypt_ready: bool,
+) -> Tuple[str, ...]:
+    steps = [reason.remediation for reason in reasons if reason.remediation]
+
+    if state == "known_key_supplied":
+        if decrypt_ready:
+            steps.append("Proceed directly to airdecap-ng or the Wi-Fi strip step.")
+        else:
+            steps.append("Finish the remaining decrypt prerequisites, then run the Wi-Fi strip step.")
+    elif state == "known_wordlist_attack_supported":
+        steps.append("Proceed with crack/decrypt, but keep expectations tied to the wordlist and handshake quality.")
+    elif artifact_kind == "insufficient_capture":
+        steps.append("Capture longer on the target AP until a fuller WPA artifact is present.")
+    elif artifact_kind == "no_usable_artifact":
+        steps.append("Keep the adapter in monitor mode and re-capture raw 802.11 traffic from the target AP.")
+    elif artifact_kind == "missing":
+        steps.append("Run monitor-mode capture or point the WPA path at an existing handshake capture before retrying.")
+    elif state == "unsupported" and not crack_ready and not decrypt_ready:
+        steps.append("Install the missing WPA prerequisites or supply a known PSK before retrying.")
+
+    return _dedupe_steps(steps)
+
+
+def _validate_wordlist_path(wordlist: str) -> Tuple[bool, Tuple[Reason, ...]]:
+    value = str(wordlist or "").strip()
+    if not value:
+        return (
+            False,
+            (
+                make_blocker(
+                    "wpa.wordlist_missing",
+                    "A real wordlist_path is missing.",
+                    remediation="Set wordlist_path to an existing wordlist file before attempting a supported WPA crack path.",
+                ),
+            ),
+        )
+
+    path = Path(value)
+    if not path.exists() or not path.is_file():
+        return (
+            False,
+            (
+                make_blocker(
+                    "wpa.wordlist_missing",
+                    "A real wordlist_path is missing.",
+                    remediation="Set wordlist_path to an existing wordlist file before attempting a supported WPA crack path.",
+                ),
+            ),
+        )
+
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0:
+        return (
+            False,
+            (
+                make_blocker(
+                    "wpa.wordlist_empty",
+                    "The configured wordlist is empty.",
+                    remediation="Point wordlist_path at a non-empty wordlist before attempting a supported WPA crack path.",
+                ),
+            ),
+        )
+
+    non_empty_lines = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                if raw_line.strip():
+                    non_empty_lines += 1
+                    if non_empty_lines >= 2:
+                        break
+    except OSError:
+        non_empty_lines = 0
+
+    if non_empty_lines == 0:
+        return (
+            False,
+            (
+                make_blocker(
+                    "wpa.wordlist_empty",
+                    "The configured wordlist is empty.",
+                    remediation="Point wordlist_path at a non-empty wordlist before attempting a supported WPA crack path.",
+                ),
+            ),
+        )
+
+    reasons: List[Reason] = [
+        make_context(
+            "wpa.wordlist_present",
+            "A usable wordlist is configured.",
+            detail=f"{path.name} is present and readable.",
+        )
+    ]
+    if non_empty_lines == 1:
+        reasons.append(
+            make_limitation(
+                "wpa.wordlist_single_entry",
+                "The configured wordlist only contains a single visible candidate.",
+                remediation="Use a broader wordlist if you expect the supported crack path to have a realistic chance of success.",
+            )
+        )
+    return True, tuple(reasons)
+
+
+def _retry_capture_reasons(config: Dict[str, object], artifact_kind: str) -> Tuple[Reason, ...]:
+    if artifact_kind == "valid_handshake":
+        return ()
+
+    monitor_method = str(config.get("monitor_method") or "airodump").strip().lower()
+    if monitor_method != "airodump":
+        return ()
+
+    bssid = str(config.get("ap_bssid") or "").strip()
+    channel = str(config.get("ap_channel") or "").strip()
+    reasons: List[Reason] = []
+
+    if not bssid:
+        reasons.append(
+            make_blocker(
+                "wpa.capture_bssid_missing",
+                "ap_bssid is missing for targeted airodump-ng capture retries.",
+                remediation="Set ap_bssid before expecting the targeted airodump-ng retry path to be ready.",
+            )
+        )
+    elif not _BSSID_RE.fullmatch(bssid):
+        reasons.append(
+            make_blocker(
+                "wpa.capture_bssid_invalid",
+                "ap_bssid is not in MAC-address form.",
+                detail=f"Got `{bssid}`.",
+                remediation="Set ap_bssid to a colon-delimited BSSID like 00:11:22:33:44:55.",
+            )
+        )
+
+    if not channel:
+        reasons.append(
+            make_blocker(
+                "wpa.capture_channel_missing",
+                "ap_channel is missing for targeted airodump-ng capture retries.",
+                remediation="Set ap_channel before expecting the targeted airodump-ng retry path to be ready.",
+            )
+        )
+    elif not _CHANNEL_RE.fullmatch(channel):
+        reasons.append(
+            make_blocker(
+                "wpa.capture_channel_invalid",
+                "ap_channel is not in a supported channel form.",
+                detail=f"Got `{channel}`.",
+                remediation="Use a numeric channel like 1, 6, 11, or a comma-separated list such as 36,40.",
+            )
+        )
+
+    if not reasons and bssid and channel:
+        reasons.append(
+            make_context(
+                "wpa.capture_target_present",
+                "Targeted airodump-ng retry settings are configured.",
+                detail=f"BSSID {bssid} on channel {channel}.",
+            )
+        )
+
+    return tuple(reasons)
+
+
+def _capture_condition_reasons(cap_path: Path, target_bssid: str = "") -> Tuple[Reason, ...]:
+    normalized_bssid = str(target_bssid or "").strip().lower()
+    if not PcapReader or not Dot11:
+        return ()
+
+    dot11_count = 0
+    target_seen = not normalized_bssid
+    try:
+        with PcapReader(str(cap_path)) as reader:
+            for packet in reader:
+                if not packet.haslayer(Dot11):
+                    continue
+                dot11_count += 1
+                if normalized_bssid:
+                    dot11 = packet[Dot11]
+                    addresses = {
+                        str(getattr(dot11, field) or "").strip().lower()
+                        for field in ("addr1", "addr2", "addr3")
+                    }
+                    if normalized_bssid in addresses:
+                        target_seen = True
+    except Exception as exc:
+        return (
+            make_limitation(
+                "wpa.capture_conditions_unverified",
+                "Capture conditions could not be fully verified from the artifact.",
+                detail=str(exc),
+            ),
+        )
+
+    reasons: List[Reason] = []
+    if dot11_count == 0:
+        reasons.append(
+            make_blocker(
+                "wpa.capture_not_80211",
+                "The capture does not appear to contain raw 802.11 traffic.",
+                remediation="Re-run monitor-mode capture or point WPA recovery at a real Wi-Fi capture file.",
+            )
+        )
+    if normalized_bssid:
+        if target_seen:
+            reasons.append(
+                make_context(
+                    "wpa.capture_target_observed",
+                    f"Frames for target BSSID {normalized_bssid} were observed in the capture.",
+                )
+            )
+        else:
+            reasons.append(
+                make_blocker(
+                    "wpa.capture_target_not_observed",
+                    "The configured target BSSID does not appear in the capture.",
+                    remediation="Verify ap_bssid, channel lock, monitor interface, and capture timing before retrying the WPA path.",
+                )
+            )
+    return tuple(reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -515,100 +961,381 @@ class Capture:
         return Path(cap)
 
     def inspect_wpa_crack_path(self, handshake_cap: Optional[str] = None) -> WPACrackReadiness:
+        def _build_readiness(
+            *,
+            state: str,
+            status: str,
+            handshake_cap_value: Optional[str],
+            handshake_artifact: str,
+            crack_ready: bool,
+            decrypt_ready: bool,
+            summary: str,
+            detail: str,
+            reasons: Tuple[Reason, ...],
+        ) -> WPACrackReadiness:
+            return WPACrackReadiness(
+                state=state,
+                status=status,
+                handshake_cap=handshake_cap_value,
+                handshake_artifact=handshake_artifact,
+                crack_ready=crack_ready,
+                decrypt_ready=decrypt_ready,
+                summary=summary,
+                detail=detail,
+                reasons=reasons,
+                next_steps=_guided_wpa_next_steps(
+                    state,
+                    handshake_artifact,
+                    reasons,
+                    crack_ready=crack_ready,
+                    decrypt_ready=decrypt_ready,
+                ),
+            )
+
         cap_path = self._resolve_handshake_cap(handshake_cap)
         password = resolve_wpa_password(self.config)
         essid = str(self.config.get("ap_essid") or "").strip()
+        bssid = str(self.config.get("ap_bssid") or "").strip()
         wordlist = str(self.config.get("wordlist_path") or "").strip()
-        has_wordlist = bool(wordlist and Path(wordlist).exists())
-        has_aircrack = bool(shutil.which("aircrack-ng"))
-        has_hashcat = bool(shutil.which("hashcat"))
-        has_converter = bool(shutil.which("cap2hccapx") or shutil.which("hcxpcapngtool"))
-        has_airdecap = bool(shutil.which("airdecap-ng"))
+        wordlist_ready, wordlist_reasons = _validate_wordlist_path(wordlist)
+        aircrack_path = shutil.which("aircrack-ng")
+        hashcat_path = shutil.which("hashcat")
+        cap2hccapx_path = shutil.which("cap2hccapx")
+        hcxpcapngtool_path = shutil.which("hcxpcapngtool")
+        airdecap_path = shutil.which("airdecap-ng")
+        has_aircrack = bool(aircrack_path)
+        has_hashcat = bool(hashcat_path)
+        has_converter = bool(cap2hccapx_path or hcxpcapngtool_path)
+        has_airdecap = bool(airdecap_path)
+        converter_name = "cap2hccapx" if cap2hccapx_path else "hcxpcapngtool" if hcxpcapngtool_path else ""
+        retry_capture_reasons = _retry_capture_reasons(self.config, "missing")
 
         if not cap_path or not cap_path.exists():
-            return WPACrackReadiness(
+            reasons = (
+                make_blocker(
+                    "wpa.handshake_missing",
+                    "No handshake capture is available yet.",
+                    remediation="Run monitor or point crack/decrypt at a real handshake capture before attempting WPA recovery.",
+                ),
+            ) + retry_capture_reasons
+            return _build_readiness(
                 state="unsupported",
                 status="unsupported",
-                handshake_cap=str(cap_path) if cap_path else None,
+                handshake_cap_value=str(cap_path) if cap_path else None,
+                handshake_artifact="missing",
                 crack_ready=False,
                 decrypt_ready=False,
                 summary="No handshake capture is available yet.",
                 detail="Run monitor or point crack/decrypt at a real handshake capture before attempting WPA recovery.",
+                reasons=reasons,
             )
 
-        size_bytes = cap_path.stat().st_size
-        decrypt_ready = bool(password and essid and has_airdecap)
-        if size_bytes < _MIN_HANDSHAKE_BYTES:
-            return WPACrackReadiness(
+        artifact = _inspect_wpa_artifact(cap_path)
+        capture_condition_reasons = _capture_condition_reasons(
+            cap_path,
+            bssid if _BSSID_RE.fullmatch(bssid) else "",
+        )
+        artifact_supports_crack = _artifact_supports_crack_readiness(artifact.kind)
+        artifact_supports_decrypt = _artifact_supports_decrypt_readiness(artifact.kind)
+        capture_conditions_blocked = any(reason.kind == "blocker" for reason in capture_condition_reasons)
+        capture_not_80211 = any(reason.code == "wpa.capture_not_80211" for reason in capture_condition_reasons)
+        retry_capture_reasons = _retry_capture_reasons(self.config, artifact.kind)
+        decrypt_ready = bool(password and essid and has_airdecap and artifact_supports_decrypt and not capture_conditions_blocked)
+        if artifact.kind == "insufficient_capture" and capture_not_80211:
+            reasons = _dedupe_reasons(
+                artifact.reasons,
+                capture_condition_reasons,
+                (
+                    make_blocker(
+                        "wpa.no_usable_artifact",
+                        "The capture does not contain a usable WPA artifact.",
+                        remediation="Capture targeted WPA traffic until a real handshake or PMKID artifact is present.",
+                    ),
+                ),
+                retry_capture_reasons,
+            )
+            return _build_readiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap_value=str(cap_path),
+                handshake_artifact="no_usable_artifact",
+                crack_ready=False,
+                decrypt_ready=False,
+                summary="The capture does not appear to contain raw 802.11 traffic.",
+                detail="The artifact is too small to contain a usable WPA exchange, and it does not appear to be an 802.11 capture.",
+                reasons=reasons,
+            )
+        if artifact.kind == "insufficient_capture":
+            reasons = _dedupe_reasons(artifact.reasons, capture_condition_reasons, retry_capture_reasons)
+            return _build_readiness(
                 state="captured_handshake_insufficient",
                 status="unsupported",
-                handshake_cap=str(cap_path),
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
                 crack_ready=False,
                 decrypt_ready=decrypt_ready,
-                summary="The handshake artifact is too small to trust.",
-                detail=(
-                    f"{cap_path.name} is only {size_bytes} bytes. Re-capture a fuller handshake before trying WPA recovery."
+                summary="The capture is too small and does not contain a usable WPA artifact.",
+                detail=artifact.detail,
+                reasons=reasons,
+            )
+        if artifact.kind == "partial_handshake":
+            reasons = _dedupe_reasons(artifact.reasons, capture_condition_reasons, retry_capture_reasons)
+            return _build_readiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
+                crack_ready=False,
+                decrypt_ready=decrypt_ready,
+                summary="Only a partial WPA handshake is present.",
+                detail=artifact.detail,
+                reasons=reasons,
+            )
+        if artifact.kind == "pmkid_only":
+            reasons = _dedupe_reasons(
+                artifact.reasons,
+                capture_condition_reasons,
+                (
+                    make_blocker(
+                        "wpa.supported_path_requires_handshake",
+                        "The current supported crack/decrypt path still requires a full WPA handshake.",
+                        remediation="Capture a full WPA handshake before expecting the supported recovery path to be ready.",
+                    ),
                 ),
+                retry_capture_reasons,
+            )
+            return _build_readiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
+                crack_ready=False,
+                decrypt_ready=False,
+                summary="The capture contains PMKID evidence, but the current supported path still needs a full WPA handshake.",
+                detail=f"{artifact.detail} The current crack/decrypt flow only treats full WPA handshakes as ready for supported recovery.",
+                reasons=reasons,
+            )
+        if artifact.kind == "no_usable_artifact":
+            reasons = _dedupe_reasons(artifact.reasons, capture_condition_reasons, retry_capture_reasons)
+            return _build_readiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
+                crack_ready=False,
+                decrypt_ready=False,
+                summary="The capture does not contain a usable WPA artifact.",
+                detail=artifact.detail,
+                reasons=reasons,
+            )
+        if capture_conditions_blocked:
+            reasons = _dedupe_reasons(artifact.reasons, capture_condition_reasons)
+            return _build_readiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
+                crack_ready=False,
+                decrypt_ready=False,
+                summary="The capture does not match the configured WPA target conditions.",
+                detail="The handshake artifact is usable, but the capture conditions do not line up with the configured target.",
+                reasons=reasons,
             )
 
         if password:
             status = "supported" if decrypt_ready else "supported_with_limits"
-            detail = "Known PSK supplied."
+            detail = f"{artifact.detail} Known PSK supplied."
+            reasons = list(_dedupe_reasons(artifact.reasons, capture_condition_reasons)) + [
+                make_context(
+                    "wpa.known_key_supplied",
+                    "A WPA key is already configured, so cracking is not required.",
+                )
+            ]
+            if has_airdecap:
+                reasons.append(
+                    make_context(
+                        "wpa.decrypt_tool_available",
+                        "airdecap-ng is available for the decrypt step.",
+                    )
+                )
             if not essid:
                 detail += " Decryption still needs ap_essid in lab.json."
+                reasons.append(
+                    make_limitation(
+                        "wpa.ap_essid_missing",
+                        "ap_essid is missing for the decrypt step.",
+                        remediation="Set ap_essid in lab.json before expecting airdecap-ng output.",
+                    )
+                )
             elif not has_airdecap:
                 detail += " Decryption still needs airdecap-ng installed."
-            return WPACrackReadiness(
+                reasons.append(
+                    make_limitation(
+                        "wpa.decrypt_tool_missing",
+                        "airdecap-ng is missing for the decrypt step.",
+                        remediation="Install airdecap-ng before expecting a supported decrypt path.",
+                    )
+                )
+            merged_reasons = tuple(reasons)
+            return _build_readiness(
                 state="known_key_supplied",
                 status=status,
-                handshake_cap=str(cap_path),
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
                 crack_ready=True,
                 decrypt_ready=decrypt_ready,
                 summary="A WPA key is already configured, so cracking is not required.",
                 detail=detail,
+                reasons=merged_reasons,
             )
 
-        crack_tool_ready = has_aircrack or (has_hashcat and has_converter)
-        if crack_tool_ready and has_wordlist:
-            detail_parts = []
+        crack_tool_ready = artifact_supports_crack and not capture_conditions_blocked and (has_aircrack or (has_hashcat and has_converter))
+        if crack_tool_ready and wordlist_ready:
+            detail_parts = [artifact.detail]
+            reasons = list(_dedupe_reasons(artifact.reasons, capture_condition_reasons)) + list(wordlist_reasons) + [
+                make_context(
+                    "wpa.handshake_present",
+                    "A usable WPA handshake is present and recovery can be attempted.",
+                )
+            ]
             if has_aircrack:
                 detail_parts.append("aircrack-ng dictionary attack is available")
+                reasons.append(make_context("wpa.aircrack_available", "aircrack-ng is available for dictionary attacks."))
             if has_hashcat and has_converter:
-                detail_parts.append("hashcat conversion path is available")
+                detail_parts.append(f"hashcat conversion path is available via {converter_name}")
+                reasons.append(make_context("wpa.hashcat_path_available", "hashcat plus capture conversion tooling is available."))
+            if has_airdecap:
+                detail_parts.append("airdecap-ng is available for the decrypt step")
+                reasons.append(make_context("wpa.decrypt_tool_available", "airdecap-ng is available for the decrypt step."))
             if not essid:
                 detail_parts.append("set ap_essid before expecting airdecap-ng output")
+                reasons.append(
+                    make_limitation(
+                        "wpa.ap_essid_missing",
+                        "ap_essid is missing for the decrypt step.",
+                        remediation="Set ap_essid before expecting airdecap-ng output.",
+                    )
+                )
             if not has_airdecap:
                 detail_parts.append("install airdecap-ng for the decrypt step")
-            return WPACrackReadiness(
+                reasons.append(
+                    make_limitation(
+                        "wpa.decrypt_tool_missing",
+                        "airdecap-ng is missing for the decrypt step.",
+                        remediation="Install airdecap-ng before expecting a supported decrypt path.",
+                    )
+                )
+            merged_reasons = tuple(reasons)
+            return _build_readiness(
                 state="known_wordlist_attack_supported",
                 status="supported_with_limits",
-                handshake_cap=str(cap_path),
+                handshake_cap_value=str(cap_path),
+                handshake_artifact=artifact.kind,
                 crack_ready=True,
-                decrypt_ready=bool(essid and has_airdecap),
-                summary="The capture is large enough to attempt a wordlist-based WPA recovery.",
+                decrypt_ready=bool(essid and has_airdecap and artifact_supports_decrypt),
+                summary="A valid WPA handshake is present and a wordlist-based WPA recovery can be attempted.",
                 detail=". ".join(part[0].upper() + part[1:] for part in detail_parts) + ".",
+                reasons=merged_reasons,
             )
 
         missing: List[str] = []
-        if not has_wordlist:
+        reasons: List[Reason] = list(_dedupe_reasons(artifact.reasons, capture_condition_reasons)) + [
+            make_blocker(
+                "wpa.path_not_ready",
+                "The capture exists, but the supported WPA recovery path is not ready.",
+            )
+        ]
+        if wordlist_ready:
+            reasons.extend(wordlist_reasons)
+        else:
             missing.append("a real wordlist_path")
+            reasons.extend(wordlist_reasons)
+        if has_aircrack:
+            reasons.append(make_context("wpa.aircrack_available", "aircrack-ng is available for dictionary attacks."))
+        else:
+            reasons.append(
+                make_limitation(
+                    "wpa.aircrack_missing",
+                    "aircrack-ng is not available.",
+                    remediation="Install aircrack-ng if you want the built-in dictionary attack path.",
+                )
+            )
+        if has_hashcat:
+            if has_converter:
+                reasons.append(
+                    make_context(
+                        "wpa.hashcat_path_available",
+                        "hashcat plus capture conversion tooling is available.",
+                        detail=f"Converter: {converter_name}.",
+                    )
+                )
+            else:
+                reasons.append(
+                    make_blocker(
+                        "wpa.hashcat_converter_missing",
+                        "The hashcat conversion helper is missing.",
+                        remediation="Install cap2hccapx or hcxpcapngtool before relying on the hashcat path.",
+                    )
+                )
+        else:
+            reasons.append(
+                make_limitation(
+                    "wpa.hashcat_missing",
+                    "hashcat is not available.",
+                    remediation="Install hashcat if you want the alternate WPA crack backend.",
+                )
+            )
         if not has_aircrack and not has_hashcat:
             missing.append("aircrack-ng or hashcat")
+            reasons.append(
+                make_blocker(
+                    "wpa.crack_toolchain_missing",
+                    "No supported crack toolchain is available.",
+                    remediation="Install aircrack-ng, or install hashcat plus cap2hccapx/hcxpcapngtool.",
+                )
+            )
         elif has_hashcat and not has_converter and not has_aircrack:
             missing.append("cap2hccapx or hcxpcapngtool for hashcat conversion")
         if not has_airdecap:
             missing.append("airdecap-ng for the decrypt step")
+            reasons.append(
+                make_blocker(
+                    "wpa.decrypt_tool_missing",
+                    "airdecap-ng is missing for the decrypt step.",
+                    remediation="Install airdecap-ng before expecting a supported decrypt path.",
+                )
+            )
+        else:
+            reasons.append(
+                make_context(
+                    "wpa.decrypt_tool_available",
+                    "airdecap-ng is available for the decrypt step.",
+                )
+            )
         if not essid:
             missing.append("ap_essid for the decrypt step")
+            reasons.append(
+                make_blocker(
+                    "wpa.ap_essid_missing",
+                    "ap_essid is missing for the decrypt step.",
+                    remediation="Set ap_essid before expecting decrypted output.",
+                )
+            )
+        else:
+            reasons.append(make_context("wpa.ap_essid_present", "ap_essid is configured for the decrypt step."))
+        reasons.extend(retry_capture_reasons)
 
-        return WPACrackReadiness(
+        merged_reasons = tuple(reasons)
+        return _build_readiness(
             state="unsupported",
             status="unsupported",
-            handshake_cap=str(cap_path),
+            handshake_cap_value=str(cap_path),
+            handshake_artifact=artifact.kind,
             crack_ready=False,
             decrypt_ready=False,
             summary="The capture exists, but the supported WPA recovery path is not ready.",
             detail="Missing prerequisites: " + ", ".join(missing) + ".",
+            reasons=merged_reasons,
         )
 
     def print_wpa_crack_status(self, handshake_cap: Optional[str] = None) -> WPACrackReadiness:
@@ -625,8 +1352,11 @@ class Capture:
         info(f"State: {readiness.state}")
         state_color(f"Status: {label}")
         info(f"Handshake: {readiness.handshake_cap or '(none)'}")
+        info(f"Artifact: {readiness.handshake_artifact or '(unknown)'}")
         info(readiness.summary)
         info(readiness.detail)
+        for step in readiness.next_steps:
+            info(f"Next: {step}")
         return readiness
 
     # ------------------------------------------------------------------

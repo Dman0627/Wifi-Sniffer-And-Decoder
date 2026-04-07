@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .corpus import CorpusStore
+from .playback import replay_confidence_summary
 from .protocols import (
     guess_unit_type,
     payload_family,
@@ -683,6 +684,14 @@ class CryptoAnalyzer:
             "average_unit_size": int(sum(len(payload) for payload in encrypted_payloads) / len(encrypted_payloads)),
             "selected_candidate_stream": selected_stream,
             "selected_protocol_support": selected_protocol_support,
+            "selected_replay_confidence": replay_confidence_summary(
+                self.config,
+                {
+                    "selected_candidate_stream": selected_stream,
+                    "selected_protocol_support": selected_protocol_support,
+                    "candidate_material": candidate_material,
+                },
+            ),
             "ciphertext_observations": {
                 "chi_squared": chi_value,
                 "average_entropy": mean_entropy,

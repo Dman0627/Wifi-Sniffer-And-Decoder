@@ -6,63 +6,322 @@ import shutil
 import socket
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .protocols import strip_rtp_header, suggested_extension, summarize_stream_support
 from .ui import done, err, info, ok, section, warn
 
-FFPLAY_FORMATS = {
-    "mpegts": "mpegts",
-    "mjpeg": "mjpeg",
-    "jpeg": "mjpeg",
-    "jpg": "mjpeg",
-    "h264": "h264",
-    "h265": "hevc",
-    "hevc": "hevc",
-    "wav": "wav",
-    "mp3": "mp3",
-    "ogg": "ogg",
-    "flac": "flac",
-    "aac": "aac",
-    "adts": "aac",
-}
+
+@dataclass(frozen=True)
+class ReplayHandler:
+    handler_id: str
+    hint_aliases: Tuple[str, ...]
+    output_extension: str
+    unit_types: Tuple[str, ...] = ()
+    ffplay_format: Optional[str] = None
+    output_mode: str = "stream"
+
+
+@dataclass(frozen=True)
+class ReconstructedUnit:
+    unit_index: int
+    unit_type: str
+    output_path: Path
+    payload: bytes
+
+
+REPLAY_HANDLERS: Tuple[ReplayHandler, ...] = (
+    ReplayHandler(
+        handler_id="txt",
+        hint_aliases=("txt", "text"),
+        output_extension=".txt",
+        unit_types=("plain_text", "command_text", "http_text", "rtsp_text"),
+        output_mode="text_export",
+    ),
+    ReplayHandler(
+        handler_id="json",
+        hint_aliases=("json",),
+        output_extension=".json",
+        unit_types=("json_text",),
+        output_mode="text_export",
+    ),
+    ReplayHandler(
+        handler_id="xml",
+        hint_aliases=("xml",),
+        output_extension=".xml",
+        unit_types=("xml_text",),
+        output_mode="text_export",
+    ),
+    ReplayHandler(
+        handler_id="jpeg",
+        hint_aliases=("jpeg", "jpg", "mjpeg"),
+        output_extension=".jpg",
+        unit_types=("jpeg_frame",),
+        ffplay_format="mjpeg",
+        output_mode="image_stream",
+    ),
+    ReplayHandler(
+        handler_id="png",
+        hint_aliases=("png",),
+        output_extension=".png",
+        unit_types=("png_image",),
+        output_mode="image_export",
+    ),
+    ReplayHandler(
+        handler_id="gif",
+        hint_aliases=("gif",),
+        output_extension=".gif",
+        unit_types=("gif_image",),
+        output_mode="image_export",
+    ),
+    ReplayHandler(
+        handler_id="bmp",
+        hint_aliases=("bmp",),
+        output_extension=".bmp",
+        unit_types=("bmp_image",),
+        output_mode="image_export",
+    ),
+    ReplayHandler(
+        handler_id="webp",
+        hint_aliases=("webp",),
+        output_extension=".webp",
+        unit_types=("webp_image",),
+        output_mode="image_export",
+    ),
+    ReplayHandler(
+        handler_id="wav",
+        hint_aliases=("wav",),
+        output_extension=".wav",
+        unit_types=("wav_audio",),
+        ffplay_format="wav",
+        output_mode="audio_stream",
+    ),
+    ReplayHandler(
+        handler_id="mp3",
+        hint_aliases=("mp3",),
+        output_extension=".mp3",
+        unit_types=("mp3_audio",),
+        ffplay_format="mp3",
+        output_mode="audio_stream",
+    ),
+    ReplayHandler(
+        handler_id="ogg",
+        hint_aliases=("ogg",),
+        output_extension=".ogg",
+        unit_types=("ogg_audio",),
+        ffplay_format="ogg",
+        output_mode="audio_stream",
+    ),
+    ReplayHandler(
+        handler_id="flac",
+        hint_aliases=("flac",),
+        output_extension=".flac",
+        unit_types=("flac_audio",),
+        ffplay_format="flac",
+        output_mode="audio_stream",
+    ),
+    ReplayHandler(
+        handler_id="aac",
+        hint_aliases=("aac", "adts"),
+        output_extension=".aac",
+        unit_types=("aac_audio",),
+        ffplay_format="aac",
+        output_mode="audio_stream",
+    ),
+    ReplayHandler(
+        handler_id="mpegts",
+        hint_aliases=("mpegts", "ts"),
+        output_extension=".ts",
+        unit_types=("mpegts_packet",),
+        ffplay_format="mpegts",
+        output_mode="video_stream",
+    ),
+    ReplayHandler(
+        handler_id="h264",
+        hint_aliases=("h264",),
+        output_extension=".h264",
+        unit_types=("h264_nal",),
+        ffplay_format="h264",
+        output_mode="video_stream",
+    ),
+    ReplayHandler(
+        handler_id="h265",
+        hint_aliases=("h265", "hevc"),
+        output_extension=".h265",
+        unit_types=("h265_nal",),
+        ffplay_format="hevc",
+        output_mode="video_stream",
+    ),
+    ReplayHandler(
+        handler_id="pdf",
+        hint_aliases=("pdf",),
+        output_extension=".pdf",
+        unit_types=("pdf_document",),
+        output_mode="document_export",
+    ),
+    ReplayHandler(
+        handler_id="zip",
+        hint_aliases=("zip",),
+        output_extension=".zip",
+        unit_types=("zip_archive",),
+        output_mode="archive_export",
+    ),
+    ReplayHandler(
+        handler_id="gzip",
+        hint_aliases=("gzip", "gz"),
+        output_extension=".gz",
+        unit_types=("gzip_archive",),
+        output_mode="archive_export",
+    ),
+    ReplayHandler(
+        handler_id="raw",
+        hint_aliases=("raw",),
+        output_extension=".bin",
+        unit_types=("opaque_chunk",),
+        output_mode="raw_export",
+    ),
+)
+
+REPLAY_HANDLER_BY_HINT: Dict[str, ReplayHandler] = {}
+REPLAY_HANDLER_BY_UNIT_TYPE: Dict[str, ReplayHandler] = {}
+for _handler in REPLAY_HANDLERS:
+    for _alias in _handler.hint_aliases:
+        REPLAY_HANDLER_BY_HINT[_alias] = _handler
+    for _unit_type in _handler.unit_types:
+        REPLAY_HANDLER_BY_UNIT_TYPE[_unit_type] = _handler
+
+DEFAULT_REPLAY_HANDLER = REPLAY_HANDLER_BY_HINT["raw"]
 
 
 def _normalize_replay_hint(config: Dict[str, object]) -> str:
     return str(config.get("replay_format_hint") or config.get("video_codec") or "raw").strip().lower()
 
 
+def _handler_for_hint(format_hint: str) -> ReplayHandler:
+    normalized = str(format_hint or "raw").strip().lower().lstrip(".")
+    return REPLAY_HANDLER_BY_HINT.get(normalized, DEFAULT_REPLAY_HANDLER)
+
+
+def _handler_for_unit_type(unit_type: str) -> ReplayHandler:
+    normalized = str(unit_type or "opaque_chunk").strip().lower()
+    return REPLAY_HANDLER_BY_UNIT_TYPE.get(normalized, DEFAULT_REPLAY_HANDLER)
+
+
 def _extension_for_hint(format_hint: str) -> str:
-    normalized = format_hint.lower().lstrip(".")
-    explicit = {
-        "txt": ".txt",
-        "text": ".txt",
-        "json": ".json",
-        "xml": ".xml",
-        "jpeg": ".jpg",
-        "jpg": ".jpg",
-        "png": ".png",
-        "gif": ".gif",
-        "bmp": ".bmp",
-        "webp": ".webp",
-        "wav": ".wav",
-        "mp3": ".mp3",
-        "ogg": ".ogg",
-        "flac": ".flac",
-        "aac": ".aac",
-        "mpegts": ".ts",
-        "ts": ".ts",
-        "h264": ".h264",
-        "h265": ".h265",
-        "hevc": ".h265",
-        "pdf": ".pdf",
-        "zip": ".zip",
-        "gz": ".gz",
-        "gzip": ".gz",
-        "raw": ".bin",
+    return _handler_for_hint(format_hint).output_extension
+
+
+def _handler_for_report(config: Dict[str, object], report: Dict[str, object]) -> ReplayHandler:
+    configured = _normalize_replay_hint(config)
+    if configured not in ("", "auto", "raw"):
+        return _handler_for_hint(configured)
+
+    selected_stream = dict(report.get("selected_candidate_stream") or {})
+    support = dict(
+        report.get("selected_protocol_support")
+        or summarize_stream_support(dict(selected_stream.get("unit_type_counts") or {}))
+    )
+    support_hint = str(support.get("replay_hint") or "").strip().lower()
+    if support_hint and support_hint != "raw":
+        return _handler_for_hint(support_hint)
+
+    return _handler_for_unit_type(_dominant_unit_type(selected_stream))
+
+
+def _choose_primary_unit(exports: List[ReconstructedUnit], handler: ReplayHandler) -> Optional[ReconstructedUnit]:
+    eligible = [item for item in exports if item.unit_type in handler.unit_types]
+    if not eligible:
+        eligible = list(exports)
+    if not eligible:
+        return None
+    return max(eligible, key=lambda item: (len(item.payload), -item.unit_index))
+
+
+def _write_stream_output(target_dir: Path, handler: ReplayHandler, exports: List[ReconstructedUnit]) -> Optional[Path]:
+    payload = b"".join(item.payload for item in exports if item.payload)
+    if not payload:
+        return None
+    output_path = target_dir / f"stream_reconstructed{handler.output_extension}"
+    output_path.write_bytes(payload)
+    return output_path
+
+
+def _write_primary_export(target_dir: Path, handler: ReplayHandler, exports: List[ReconstructedUnit]) -> Optional[Path]:
+    primary = _choose_primary_unit(exports, handler)
+    if primary is None or not primary.payload:
+        return None
+    label = {
+        "image_export": "image_export",
+        "document_export": "document_export",
+        "archive_export": "archive_export",
+        "raw_export": "raw_export",
+    }.get(handler.output_mode, "primary_export")
+    output_path = target_dir / f"{label}{handler.output_extension}"
+    output_path.write_bytes(primary.payload)
+    return output_path
+
+
+def _write_reconstruction_manifest(
+    target_dir: Path,
+    handler: ReplayHandler,
+    selected_stream: Dict[str, object],
+    support: Dict[str, object],
+    exports: List[ReconstructedUnit],
+    primary_output: Optional[Path],
+    confidence: Dict[str, object],
+) -> Path:
+    report = {
+        "handler_id": handler.handler_id,
+        "output_mode": handler.output_mode,
+        "primary_output": str(primary_output) if primary_output else "",
+        "stream_id": str(selected_stream.get("stream_id") or ""),
+        "dominant_unit_type": str(support.get("dominant_unit_type") or _dominant_unit_type(selected_stream)),
+        "replay_level": str(support.get("replay_level") or ""),
+        "replay_supported": str(support.get("replay_level") or "") != "unsupported",
+        "export_only": handler.output_mode in {"image_export", "document_export", "archive_export", "raw_export"},
+        "support_detail": str(support.get("detail") or ""),
+        "replay_confidence": confidence,
+        "unit_count": len(exports),
+        "units": [
+            {
+                "unit_index": item.unit_index,
+                "unit_type": item.unit_type,
+                "length": len(item.payload),
+                "path": str(item.output_path),
+            }
+            for item in exports
+        ],
     }
-    return explicit.get(normalized, ".bin")
+    manifest_path = target_dir / "reconstruction_report.json"
+    manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return manifest_path
+
+
+def _finalize_reconstruction(
+    target_dir: Path,
+    handler: ReplayHandler,
+    selected_stream: Dict[str, object],
+    support: Dict[str, object],
+    exports: List[ReconstructedUnit],
+    confidence: Dict[str, object],
+) -> Optional[Path]:
+    if handler.output_mode in {"text_export", "audio_stream", "video_stream", "image_stream"}:
+        primary_output = _write_stream_output(target_dir, handler, exports)
+    else:
+        primary_output = _write_primary_export(target_dir, handler, exports)
+
+    _write_reconstruction_manifest(
+        target_dir=target_dir,
+        handler=handler,
+        selected_stream=selected_stream,
+        support=support,
+        exports=exports,
+        primary_output=primary_output,
+        confidence=confidence,
+    )
+    return primary_output
 
 
 class ReplaySink:
@@ -71,14 +330,15 @@ class ReplaySink:
         replay_dir = Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "replay"
         replay_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self.format_hint = _normalize_replay_hint(config)
-        extension = _extension_for_hint(self.format_hint)
+        self.handler = _handler_for_hint(_normalize_replay_hint(config))
+        self.format_hint = self.handler.handler_id
+        extension = self.handler.output_extension
         self.output_path = replay_dir / f"reconstructed_{timestamp}{extension}"
         self.handle = self.output_path.open("wb")
         self.player: Optional[subprocess.Popen] = None
 
         mode = str(config.get("playback_mode") or "both").lower()
-        codec = FFPLAY_FORMATS.get(self.format_hint)
+        codec = self.handler.ffplay_format
         ffplay = shutil.which("ffplay")
         if mode in ("ffplay", "both") and ffplay and codec:
             self.player = subprocess.Popen(
@@ -105,7 +365,10 @@ class ReplaySink:
         elif mode in ("ffplay", "both") and not ffplay:
             warn("ffplay is not on PATH. Falling back to writing a reconstructed file only.")
         elif mode in ("ffplay", "both") and not codec:
-            warn(f"Format hint {self.format_hint!r} is file-only. Writing a reconstructed file without ffplay.")
+            warn(
+                f"Replay handler {self.handler.handler_id!r} is file-only. "
+                "Writing a reconstructed file without ffplay."
+            )
 
     def write(self, payload: bytes) -> None:
         self.handle.write(payload)
@@ -183,40 +446,7 @@ def _dominant_unit_type(selected_stream: Dict[str, object]) -> str:
 
 
 def infer_replay_hint(config: Dict[str, object], report: Dict[str, object]) -> str:
-    configured = _normalize_replay_hint(config)
-    if configured not in ("", "auto", "raw"):
-        return configured
-    selected_stream = dict(report.get("selected_candidate_stream") or {})
-    support = dict(report.get("selected_protocol_support") or summarize_stream_support(dict(selected_stream.get("unit_type_counts") or {})))
-    support_hint = str(support.get("replay_hint") or "").strip().lower()
-    if support_hint and support_hint != "raw":
-        return support_hint
-    dominant = _dominant_unit_type(selected_stream)
-    mapping = {
-        "plain_text": "txt",
-        "command_text": "txt",
-        "json_text": "json",
-        "xml_text": "xml",
-        "http_text": "txt",
-        "rtsp_text": "txt",
-        "jpeg_frame": "jpeg",
-        "png_image": "png",
-        "gif_image": "gif",
-        "bmp_image": "bmp",
-        "webp_image": "webp",
-        "wav_audio": "wav",
-        "mp3_audio": "mp3",
-        "ogg_audio": "ogg",
-        "flac_audio": "flac",
-        "aac_audio": "aac",
-        "pdf_document": "pdf",
-        "zip_archive": "zip",
-        "gzip_archive": "gzip",
-        "mpegts_packet": "mpegts",
-        "h264_nal": "h264",
-        "h265_nal": "h265",
-    }
-    return mapping.get(dominant, "raw")
+    return _handler_for_report(config, report).handler_id
 
 
 def replay_support_summary(report: Dict[str, object]) -> Dict[str, object]:
@@ -227,6 +457,124 @@ def replay_support_summary(report: Dict[str, object]) -> Dict[str, object]:
     return support
 
 
+def replay_confidence_summary(config: Dict[str, object], report: Dict[str, object]) -> Dict[str, object]:
+    support = replay_support_summary(report)
+    selected_stream = dict(report.get("selected_candidate_stream") or {})
+    candidate_material = dict(report.get("candidate_material") or {})
+    replay_level = str(support.get("replay_level") or "unsupported")
+    handler = DEFAULT_REPLAY_HANDLER if replay_level == "unsupported" else _handler_for_report(config, report)
+
+    export_only = handler.output_mode in {"image_export", "document_export", "archive_export", "raw_export"}
+    supports_live_replay = bool(handler.ffplay_format)
+    candidate_material_mode = str(candidate_material.get("mode") or "")
+    candidate_material_ready = bool(candidate_material_mode)
+
+    base_scores = {
+        "guaranteed": 0.94,
+        "high_confidence": 0.82,
+        "heuristic": 0.56,
+        "unsupported": 0.18,
+    }
+    confidence_score = base_scores.get(replay_level, 0.2)
+    reasons: List[str] = []
+
+    if replay_level == "guaranteed":
+        reasons.append("selected payload family is in the guaranteed replay registry")
+    elif replay_level == "high_confidence":
+        reasons.append("selected payload family is in the high-confidence replay registry")
+    elif replay_level == "heuristic":
+        reasons.append("selected payload family is supported only heuristically")
+    else:
+        reasons.append("selected payload family is outside the replay registry")
+
+    if export_only:
+        reasons.append("chosen handler exports artifacts rather than claiming live replay")
+        if replay_level != "unsupported":
+            confidence_score -= 0.03
+    elif supports_live_replay:
+        reasons.append(f"chosen handler supports ffplay streaming via {handler.ffplay_format}")
+        confidence_score += 0.02
+    else:
+        reasons.append("chosen handler writes a reconstructed file without live replay support")
+
+    if candidate_material_ready:
+        reasons.append(f"candidate replay material is ready ({candidate_material_mode})")
+        confidence_score += 0.02
+    else:
+        reasons.append("candidate replay material is not ready yet")
+        confidence_score -= 0.08
+
+    signal_strength = str((selected_stream.get("candidate_metadata") or {}).get("signal_strength") or "").strip().lower()
+    if signal_strength == "strong":
+        reasons.append("candidate stream evidence is strong")
+        confidence_score += 0.03
+    elif signal_strength == "weak":
+        reasons.append("candidate stream evidence is weak")
+        confidence_score -= 0.06
+    elif signal_strength == "mixed":
+        reasons.append("candidate stream evidence is mixed")
+
+    confidence_score = max(0.0, min(0.99, round(confidence_score, 3)))
+    if confidence_score >= 0.85:
+        confidence_band = "strong"
+    elif confidence_score >= 0.65:
+        confidence_band = "good"
+    elif confidence_score >= 0.4:
+        confidence_band = "limited"
+    else:
+        confidence_band = "low"
+
+    if replay_level == "unsupported":
+        confidence_label = "unsupported_export"
+    elif export_only:
+        confidence_label = f"{replay_level}_export"
+    else:
+        confidence_label = replay_level
+
+    if replay_level == "unsupported":
+        delivery_mode = "raw_artifact_export"
+        summary = (
+            "Replay stays unsupported for this family, but raw bytes can still be exported "
+            "with metadata for manual inspection."
+        )
+    elif export_only:
+        delivery_mode = "artifact_export"
+        summary = (
+            f"Confidence is {confidence_band} for exporting this family through the "
+            f"{handler.handler_id} handler."
+        )
+    elif supports_live_replay:
+        delivery_mode = "stream_replay"
+        summary = (
+            f"Confidence is {confidence_band} for replaying or reconstructing this family "
+            f"through the {handler.handler_id} handler."
+        )
+    else:
+        delivery_mode = "reconstructed_file_export"
+        summary = (
+            f"Confidence is {confidence_band} for reconstructing this family to a file "
+            f"through the {handler.handler_id} handler."
+        )
+
+    return {
+        "handler_id": handler.handler_id,
+        "output_mode": handler.output_mode,
+        "delivery_mode": delivery_mode,
+        "replay_level": replay_level,
+        "confidence_label": confidence_label,
+        "confidence_band": confidence_band,
+        "confidence_score": confidence_score,
+        "candidate_material_ready": candidate_material_ready,
+        "candidate_material_mode": candidate_material_mode,
+        "supports_live_replay": supports_live_replay,
+        "export_only": export_only,
+        "supported": replay_level != "unsupported",
+        "detail": str(support.get("detail") or ""),
+        "reasons": reasons[:6],
+        "summary": summary,
+    }
+
+
 def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object]) -> Optional[str]:
     candidate_material = dict(report.get("candidate_material") or {})
     if not candidate_material:
@@ -234,17 +582,24 @@ def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object
 
     support = replay_support_summary(report)
     replay_level = str(support.get("replay_level") or "unsupported")
+    replay_handler = _handler_for_report(config, report)
     if replay_level == "unsupported":
-        err("The selected stream does not belong to a supported replay family.")
+        warn("The selected stream does not belong to a supported replay family.")
         warn(str(support.get("detail") or "Replay stays unsupported for this protocol family."))
-        return None
+        info("Exporting raw bytes with reconstruction metadata instead of claiming replay support.")
+        replay_handler = DEFAULT_REPLAY_HANDLER
     if replay_level == "heuristic":
         warn(str(support.get("detail") or "Replay remains heuristic for this protocol family."))
-    else:
+    elif replay_level != "unsupported":
         info(
             f"Replay family support: {replay_level.replace('_', ' ')} "
             f"for {support.get('dominant_unit_type') or 'selected stream'}."
         )
+    confidence = replay_confidence_summary(config, report)
+    info(
+        f"Replay/export confidence: {confidence.get('confidence_band')} "
+        f"[{confidence.get('confidence_label')}, score={confidence.get('confidence_score')}]"
+    )
 
     manifest_path = Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "manifest.json"
     manifest = _load_json(manifest_path)
@@ -260,7 +615,6 @@ def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object
     if not cipher.load():
         return None
 
-    replay_hint = infer_replay_hint(config, report)
     replay_dir = Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "replay"
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     target_dir = replay_dir / f"reconstructed_capture_{timestamp}"
@@ -271,9 +625,8 @@ def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object
         return None
     units.sort(key=lambda unit: (unit.get("timestamp_start", 0), unit.get("unit_index", 0)))
 
-    aggregate = bytearray()
     dominant_type = _dominant_unit_type(selected_stream)
-    aggregate_extension = _extension_for_hint(replay_hint or dominant_type)
+    reconstructed_units: List[ReconstructedUnit] = []
     for index, unit in enumerate(units, start=1):
         file_path = Path(str(unit.get("file") or ""))
         if not file_path.exists():
@@ -284,10 +637,26 @@ def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object
         extension = suggested_extension(unit_type)
         output_path = target_dir / f"unit_{index:05d}{extension}"
         output_path.write_bytes(decrypted)
-        aggregate.extend(decrypted)
+        reconstructed_units.append(
+            ReconstructedUnit(
+                unit_index=index,
+                unit_type=unit_type,
+                output_path=output_path,
+                payload=decrypted,
+            )
+        )
 
-    aggregate_path = target_dir / f"stream_reconstructed{aggregate_extension}"
-    aggregate_path.write_bytes(bytes(aggregate))
+    if not reconstructed_units:
+        return None
+
+    _finalize_reconstruction(
+        target_dir=target_dir,
+        handler=replay_handler,
+        selected_stream=selected_stream,
+        support=support,
+        exports=reconstructed_units,
+        confidence=confidence,
+    )
     done(f"Offline reconstruction written to {target_dir}")
     return str(target_dir)
 

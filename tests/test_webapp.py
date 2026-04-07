@@ -144,6 +144,63 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
             "bundle": {
                 "detection": {"selected_candidate_stream": {"stream_id": "stream-1", "candidate_class": "jpeg", "score": 0.9}},
                 "analysis": {"selected_candidate_stream": {"stream_id": "stream-1"}, "recommendations": ["Use <safe> replay"]},
+                "status_bundle": {
+                    "machine_summary": {
+                        "headline": "Windows controller + Linux appliance / privilege=user",
+                        "items": [
+                            {
+                                "label": "Local capture",
+                                "status": "limited",
+                                "summary": "This machine can capture a pcap locally, but monitor work is still limited.",
+                                "reason": "Windows capture depends on Npcap.",
+                                "next_step": "Prefer the Linux appliance path for full Wi-Fi lab work.",
+                            }
+                        ],
+                    },
+                    "workflow": [
+                        {
+                            "area": "monitor mode + Wi-Fi lab capture",
+                            "status": "limited",
+                            "summary": "Run monitor-mode capture, handshake collection, and other Wi-Fi lab steps.",
+                            "detail": "Capture tooling is present, but the path is still limited.",
+                            "reasons": ["Adapter support is still limited."],
+                            "next_steps": ["Prefer the Linux appliance path for full monitor-mode work."],
+                        }
+                    ],
+                    "selection": {
+                        "status": "limited",
+                        "summary": "Replay can proceed, but there are caveats you should see first.",
+                        "decode_level": "heuristic",
+                        "replay_level": "heuristic",
+                        "dominant_unit_type": "jpeg_image",
+                        "signal_strength": "mixed",
+                        "notes": ["Thin capture sample."],
+                        "next_steps": ["Capture more payload before replaying."],
+                    },
+                    "replay": {
+                        "status": "limited",
+                        "summary": "Replay can proceed, but there are caveats you should see first.",
+                        "decode_level": "heuristic",
+                        "replay_level": "heuristic",
+                        "dominant_unit_type": "jpeg_image",
+                        "reasons": ["Thin capture sample."],
+                        "next_steps": ["Capture more payload before replaying."],
+                        "confidence": {
+                            "confidence_band": "limited",
+                            "confidence_label": "heuristic",
+                            "confidence_score": 0.58,
+                            "delivery_mode": "replay_or_export",
+                        },
+                    },
+                    "wpa": {
+                        "status": "blocked",
+                        "summary": "A usable WPA artifact is still missing.",
+                        "state": "unsupported",
+                        "handshake_artifact": "missing",
+                        "reasons": ["No handshake or PMKID capture is available."],
+                        "next_steps": ["Capture a handshake before retrying WPA decrypt."],
+                    },
+                },
                 "candidate_rows": [],
                 "corpus_entries": [],
                 "corpus_status": {},
@@ -166,6 +223,41 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
     assert "Working &lt;now&gt;" in html
     assert "Use &lt;safe&gt; replay" in html
     assert "A&amp;B" in html
+    assert "What This Machine Can Do" in html
+    assert "Windows controller + Linux appliance / privilege=user" in html
+    assert "Prefer the Linux appliance path for full Wi-Fi lab work." in html
+    assert "Workflow Capabilities" in html
+    assert "Replay + WPA Readiness" in html
+    assert "Capture more payload before replaying." in html
+    assert "Capture a handshake before retrying WPA decrypt." in html
+
+
+def test_dashboard_snapshot_includes_shared_status_bundle(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    output_dir = tmp_path / "pipeline_output"
+    output_dir.mkdir()
+    save_config({"output_dir": str(output_dir)}, str(config_path), quiet=True)
+    state = DashboardState(config_path=config_path)
+
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.build_surface_status_bundle",
+        lambda config, detection, analysis: {
+            "machine_summary": {
+                "headline": "Ubuntu standalone / privilege=root",
+                "items": [{"label": "Local capture", "status": "supported", "summary": "Capture locally."}],
+            },
+            "workflow": [{"area": "local packet capture", "status": "supported", "summary": "Capture locally."}],
+            "selection": {"status": "ready", "summary": "Selection is ready."},
+            "replay": {"status": "ready", "summary": "Replay is ready."},
+            "wpa": {"status": "blocked", "summary": "WPA is blocked."},
+        },
+    )
+
+    snapshot = state.snapshot()
+
+    assert snapshot["bundle"]["status_bundle"]["machine_summary"]["headline"] == "Ubuntu standalone / privilege=root"
+    assert snapshot["bundle"]["status_bundle"]["workflow"][0]["area"] == "local packet capture"
+    assert snapshot["bundle"]["status_bundle"]["replay"]["status"] == "ready"
 
 
 def test_dashboard_http_routes_smoke(monkeypatch, tmp_path) -> None:

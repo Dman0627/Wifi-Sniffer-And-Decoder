@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .capture import Capture
+from .environment import build_capability_report
 from .protocols import summarize_stream_support
 from .ui import err, info, ok, section, warn
 
@@ -220,15 +221,9 @@ def evaluate_wpa_feasibility(config: Dict[str, object]) -> Dict[str, object]:
         "unsupported": "blocked",
     }
     status = status_map.get(readiness.status, "blocked")
-    next_steps: List[str] = []
-    if readiness.state == "captured_handshake_insufficient":
-        next_steps.append("Re-capture a fuller handshake before retrying WPA recovery.")
-    elif readiness.state == "unsupported":
+    next_steps: List[str] = list(readiness.next_steps)
+    if not next_steps and readiness.state == "unsupported":
         next_steps.append("Install the missing WPA prerequisites or supply a known PSK.")
-    elif readiness.state == "known_wordlist_attack_supported":
-        next_steps.append("Proceed with crack/decrypt, but keep expectations tied to the wordlist and handshake quality.")
-    elif readiness.state == "known_key_supplied":
-        next_steps.append("Proceed directly to airdecap-ng or the Wi-Fi strip step.")
 
     return {
         "status": status,
@@ -237,10 +232,12 @@ def evaluate_wpa_feasibility(config: Dict[str, object]) -> Dict[str, object]:
         "next_steps": next_steps,
         "state": readiness.state,
         "handshake_cap": readiness.handshake_cap,
+        "handshake_artifact": readiness.handshake_artifact,
     }
 
 
 def evaluate_pipeline_feasibility(config: Dict[str, object], report: Optional[Dict[str, object]]) -> Dict[str, object]:
+    capability_report = build_capability_report(config)
     replay = (
         evaluate_replay_feasibility(config, report)
         if report
@@ -258,6 +255,28 @@ def evaluate_pipeline_feasibility(config: Dict[str, object], report: Optional[Di
     return {
         "status": overall_status,
         "summary": "Replay and WPA preflight evaluated.",
+        "capabilities": {
+            "platform": capability_report.platform.__dict__,
+            "privilege_mode": capability_report.privilege_mode,
+            "capture_methods": {
+                method.key: {
+                    "status": method.status,
+                    "available": method.available,
+                    "reason_codes": [reason.code for reason in method.reasons],
+                }
+                for method in capability_report.capture_methods
+            },
+            "wpa": {
+                "status": capability_report.wpa.status,
+                "state": capability_report.wpa.state,
+                "reason_codes": [reason.code for reason in capability_report.wpa.reasons],
+            },
+            "remote": {
+                "status": capability_report.remote.status,
+                "configured_host": capability_report.remote.configured_host,
+                "reason_codes": [reason.code for reason in capability_report.remote.reasons],
+            },
+        },
         "replay": replay,
         "wpa": wpa,
     }
@@ -266,6 +285,19 @@ def evaluate_pipeline_feasibility(config: Dict[str, object], report: Optional[Di
 def print_pipeline_feasibility(config: Dict[str, object], report: Optional[Dict[str, object]]) -> Dict[str, object]:
     feasibility = evaluate_pipeline_feasibility(config, report)
     section("Pipeline Preflight")
+
+    capabilities = dict(feasibility.get("capabilities") or {})
+    methods = dict(capabilities.get("capture_methods") or {})
+    platform = dict(capabilities.get("platform") or {})
+    if platform:
+        info(
+            "Capabilities: "
+            f"{platform.get('product_profile_label', '(unknown profile)')} / "
+            f"privilege={capabilities.get('privilege_mode', 'unknown')} / "
+            f"local={dict(methods.get('local_capture') or {}).get('status', 'unknown')} / "
+            f"monitor={dict(methods.get('monitor_capture') or {}).get('status', 'unknown')} / "
+            f"remote={dict(methods.get('remote_capture') or {}).get('status', 'unknown')}"
+        )
 
     replay = feasibility["replay"]
     replay_printer = {"ready": ok, "limited": warn, "blocked": err}[replay["status"]]

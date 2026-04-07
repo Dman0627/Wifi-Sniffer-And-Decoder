@@ -4,6 +4,7 @@ import concurrent.futures
 import ipaddress
 import json
 import socket
+import time
 import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional
@@ -11,6 +12,8 @@ from typing import Callable, Dict, List, Optional
 DEFAULT_APPLIANCE_HEALTH_PORT = 8741
 DEFAULT_DISCOVERY_TIMEOUT = 0.35
 DEFAULT_DISCOVERY_HOST_LIMIT = 64
+DEFAULT_DISCOVERY_PROBE_ATTEMPTS = 2
+DEFAULT_DISCOVERY_PROBE_BACKOFF_SECONDS = 0.1
 DEFAULT_DISCOVERY_HOSTNAMES = (
     "raspberrypi",
     "raspberrypi.local",
@@ -101,10 +104,18 @@ def _candidate_discovery_hosts(
 
 def _probe_remote_appliance(host: str, *, health_port: int, timeout: float, user_hint: str = "") -> Optional[Dict[str, str]]:
     endpoint = f"http://{host}:{int(health_port)}/health"
-    try:
-        with urllib.request.urlopen(endpoint, timeout=max(0.1, float(timeout))) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+    payload = None
+    max_attempts = max(1, int(DEFAULT_DISCOVERY_PROBE_ATTEMPTS))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with urllib.request.urlopen(endpoint, timeout=max(0.1, float(timeout))) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+            payload = None
+            if attempt < max_attempts:
+                time.sleep(DEFAULT_DISCOVERY_PROBE_BACKOFF_SECONDS * attempt)
+    if payload is None:
         return None
 
     if not isinstance(payload, dict):
@@ -129,8 +140,10 @@ def _probe_remote_appliance(host: str, *, health_port: int, timeout: float, user
         "health_path": str(data.get("health_path") or "/health"),
         "control_mode": str(data.get("control_mode") or "agent"),
         "agent_protocol": str(payload.get("protocol") or ""),
+        "agent_version": str(data.get("agent_version") or ""),
         "capture_dir": str(data.get("capture_dir") or ""),
         "service_status": str(data.get("service_status") or ""),
+        "remote_root": str(data.get("remote_root") or ""),
         "ssh_user": ssh_user,
     }
 

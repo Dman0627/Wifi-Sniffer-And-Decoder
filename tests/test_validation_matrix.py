@@ -52,7 +52,19 @@ def test_simulated_step6_linux_validation_matrix(
     monkeypatch.setattr(cli, "run_capture", lambda config, strip_wifi=False: str(capture_path))
     monkeypatch.setattr(cli, "run_extract", lambda config, pcap: {"streams": 1})
     monkeypatch.setattr(cli, "run_detect", lambda config, manifest_path=None: {"selected_candidate_stream": {"stream_id": "demo"}})
-    monkeypatch.setattr(cli, "run_analyze", lambda config, decrypted_dir=None: {"candidate_material": {"mode": "static_xor_candidate"}})
+    monkeypatch.setattr(
+        cli,
+        "run_analyze",
+        lambda config, decrypted_dir=None: {
+            "candidate_material": {"mode": "static_xor_candidate"},
+            "selected_protocol_support": {"replay_level": "guaranteed", "dominant_unit_type": "plain_text"},
+            "selected_replay_confidence": {
+                "handler_id": "txt",
+                "confidence_label": "guaranteed",
+                "supported": True,
+            },
+        },
+    )
 
     support = environment.command_support("validate-local", {})
     assert support.status == "official"
@@ -73,6 +85,9 @@ def test_simulated_step6_linux_validation_matrix(
     assert data["interface_check"]["present"] is True
     assert data["smoke_capture"]["success"] is True
     assert data["processing_smoke"]["success"] is True
+    assert data["processing_smoke"]["selected_replay_confidence"]["handler_id"] == "txt"
+    assert data["capability_report"]["platform"]["product_profile_label"] == expected_label
+    assert data["status_bundle"]["machine_summary"]["items"]
     assert data["overall_ok"] is True
 
 
@@ -139,4 +154,6 @@ def test_simulated_step6_windows_remote_validation_matrix(monkeypatch, tmp_path:
     assert data["environment_ok"] is True
     assert data["doctor"]["ok"] is True
     assert data["smoke_capture"]["success"] is True
+    assert data["capability_report"]["platform"]["product_profile_label"] == support.profile.label
+    assert data["status_bundle"]["machine_summary"]["items"]
     assert data["overall_ok"] is True

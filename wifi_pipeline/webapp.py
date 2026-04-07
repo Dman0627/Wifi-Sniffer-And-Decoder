@@ -20,6 +20,7 @@ from .corpus import CorpusStore
 from .environment import check_environment, list_interfaces
 from .extract import StreamExtractor
 from .playback import infer_replay_hint, reconstruct_from_capture
+from .status_language import build_surface_status_bundle
 from .webapp_render import render_dashboard_html
 
 DEFAULT_WEB_HOST = "127.0.0.1"
@@ -118,10 +119,12 @@ def _report_bundle(config: Dict[str, object]) -> Dict[str, object]:
     analysis = _quiet_load_json(_analysis_report_path(config)) or {}
     candidate_rows = _rank_candidate_streams(manifest, config) if manifest else []
     corpus = CorpusStore(config)
+    status_bundle = build_surface_status_bundle(config, detection, analysis)
     return {
         "manifest": manifest,
         "detection": detection,
         "analysis": analysis,
+        "status_bundle": status_bundle,
         "candidate_rows": candidate_rows,
         "corpus_status": corpus.status(),
         "corpus_entries": corpus.recent_entries(limit=8),
@@ -421,6 +424,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             config = _load_dashboard_config(str(self.app.config_path))
             config["preferred_stream_id"] = stream_id
             _save_dashboard_config(config, str(self.app.config_path))
+            if stream_id:
+                StreamExtractor(config).remember_candidate_feedback_by_stream_id(
+                    stream_id,
+                    "pin",
+                    note="Pinned from the dashboard.",
+                )
             self.app.add_log("pin", "ok", f"Pinned preferred stream to {stream_id or '(auto)'}", "")
             self._redirect("/")
             return

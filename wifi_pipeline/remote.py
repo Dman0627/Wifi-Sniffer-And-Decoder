@@ -39,6 +39,9 @@ class RemoteSource:
 
 REMOTE_INSTALL_MODES = ("auto", "native", "bundle")
 REMOTE_INSTALL_PROFILES = ("standard", "appliance")
+REMOTE_AGENT_PROTOCOL = "capture-agent/v1"
+REMOTE_RETRY_ATTEMPTS = 3
+REMOTE_RETRY_BACKOFF_SECONDS = 0.5
 
 
 def _run_remote(
@@ -56,6 +59,29 @@ def _run_remote(
         input=input,
         check=False,
     )
+
+
+def _retry_delay_seconds(attempt: int) -> float:
+    return float(REMOTE_RETRY_BACKOFF_SECONDS) * max(1, int(attempt))
+
+
+def _retry_remote_call(action, *, should_retry, attempts: int = REMOTE_RETRY_ATTEMPTS):
+    max_attempts = max(1, int(attempts))
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        result = action()
+        if not should_retry(result):
+            return result
+        if attempt < max_attempts:
+            time.sleep(_retry_delay_seconds(attempt))
+    return result
+
+
+def _process_retryable(result: subprocess.CompletedProcess, *, stop_markers: tuple[str, ...] = ()) -> bool:
+    if result.returncode == 0:
+        return False
+    message = f"{result.stderr or ''} {result.stdout or ''}".lower()
+    return not any(marker in message for marker in stop_markers)
 
 
 def _has_ssh_tools() -> bool:
@@ -180,7 +206,10 @@ def _resolve_latest_remote_path(source: RemoteSource) -> Optional[str]:
     if not patterns:
         return None
     escaped = " ".join(_escape_remote(pattern) for pattern in patterns)
-    result = _run_remote(source, ["--", "sh", "-lc", f"ls -t {escaped} 2>/dev/null | head -n 1"])
+    result = _retry_remote_call(
+        lambda: _run_remote(source, ["--", "sh", "-lc", f"ls -t {escaped} 2>/dev/null | head -n 1"]),
+        should_retry=lambda outcome: outcome.returncode != 0 or not (outcome.stdout or "").strip(),
+    )
     if result.returncode != 0:
         return None
     latest = (result.stdout or "").strip()
@@ -188,7 +217,10 @@ def _resolve_latest_remote_path(source: RemoteSource) -> Optional[str]:
 
 
 def _resolve_remote_home(source: RemoteSource) -> Optional[str]:
-    result = _run_remote(source, ["--", "sh", "-lc", 'printf "%s" "$HOME"'])
+    result = _retry_remote_call(
+        lambda: _run_remote(source, ["--", "sh", "-lc", 'printf "%s" "$HOME"']),
+        should_retry=lambda outcome: outcome.returncode != 0 or not (outcome.stdout or "").strip(),
+    )
     if result.returncode != 0:
         return None
     value = (result.stdout or "").strip()
@@ -418,6 +450,8 @@ fi
 INTERFACE=""
 DURATION="60"
 OUTPUT=""
+STALE_PID_CLEANED="no"
+STALE_PID_VALUE=""
 
 usage() {{
     echo "Usage: wifi-pipeline-service <start|stop|status|last-capture> [--interface <iface>] [--duration <seconds>] [--output <path>]" >&2
@@ -427,6 +461,54 @@ resolve_helper() {{
     if [[ -x "$LOCAL_HELPER" ]]; then
         HELPER="$LOCAL_HELPER"
     fi
+}}
+
+current_boot_id() {{
+    if [[ -r "/proc/sys/kernel/random/boot_id" ]]; then
+        tr -d '[:space:]' < "/proc/sys/kernel/random/boot_id"
+    else
+        printf 'unknown'
+    fi
+}}
+
+meta_value() {{
+    local key="$1"
+    if [[ ! -f "$META_FILE" ]]; then
+        return 0
+    fi
+    grep -E "^${{key}}=" "$META_FILE" | tail -n 1 | cut -d= -f2- || true
+}}
+
+meta_set() {{
+    local key="$1"
+    local value="${{2-}}"
+    local temp_file=""
+    mkdir -p "$STATE_DIR"
+    touch "$META_FILE"
+    temp_file="$(mktemp "$STATE_DIR/meta.XXXXXX")"
+    awk -F= -v key="$key" -v value="$value" '
+        BEGIN {{ updated=0 }}
+        $1 == key {{ print key "=" value; updated=1; next }}
+        {{ print }}
+        END {{ if (!updated) print key "=" value }}
+    ' "$META_FILE" > "$temp_file"
+    mv "$temp_file" "$META_FILE"
+}}
+
+finalize_lifecycle_state() {{
+    local result_name="$1"
+    local exit_code="$2"
+    local reason="$3"
+    [[ -f "$META_FILE" ]] || return 0
+    meta_set finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    meta_set last_result "$result_name"
+    meta_set last_exit_code "$exit_code"
+    meta_set recovery_reason "$reason"
+}}
+
+reset_service_flags() {{
+    STALE_PID_CLEANED="no"
+    STALE_PID_VALUE=""
 }}
 
 running_pid() {{
@@ -443,6 +525,8 @@ running_pid() {{
         printf '%s\\n' "$pid"
         return 0
     fi
+    STALE_PID_CLEANED="yes"
+    STALE_PID_VALUE="$pid"
     rm -f "$PID_FILE"
     return 1
 }}
@@ -453,19 +537,59 @@ emit_status() {{
     local current_output=""
     local marker_file=""
     local checksum_file=""
+    local last_result=""
+    local finished_at=""
+    local meta_boot_id=""
+    local observed_boot_id=""
+    local recovery_reason=""
+    reset_service_flags
     if pid="$(running_pid)"; then
         service_status="running"
     elif [[ -f "$META_FILE" ]]; then
-        local last_result=""
-        last_result="$(grep -E '^last_result=' "$META_FILE" | tail -n 1 | cut -d= -f2- || true)"
-        current_output="$(grep -E '^output=' "$META_FILE" | tail -n 1 | cut -d= -f2- || true)"
-        if [[ "$last_result" == "failed" ]]; then
-            service_status="failed"
+        last_result="$(meta_value last_result)"
+        current_output="$(meta_value output)"
+        finished_at="$(meta_value finished_at)"
+        meta_boot_id="$(meta_value boot_id)"
+        recovery_reason="$(meta_value recovery_reason)"
+        observed_boot_id="$(current_boot_id)"
+        if [[ "$last_result" == "starting" && -z "$finished_at" ]]; then
+            if [[ -n "$meta_boot_id" && -n "$observed_boot_id" && "$meta_boot_id" != "$observed_boot_id" ]]; then
+                finalize_lifecycle_state "interrupted_reboot" "130" "reboot"
+                last_result="interrupted_reboot"
+                recovery_reason="reboot"
+            elif [[ "$STALE_PID_CLEANED" == "yes" ]]; then
+                finalize_lifecycle_state "interrupted" "130" "stale_pid"
+                last_result="interrupted"
+                recovery_reason="stale_pid"
+            fi
         fi
+        case "$last_result" in
+            failed)
+                service_status="failed"
+                ;;
+            stopped)
+                service_status="stopped"
+                ;;
+            interrupted|interrupted_reboot)
+                service_status="interrupted"
+                ;;
+            complete|"")
+                service_status="idle"
+                ;;
+        esac
     fi
     printf 'service_status=%s\\n' "$service_status"
     if [[ -n "$pid" ]]; then
         printf 'pid=%s\\n' "$pid"
+    fi
+    if [[ "$STALE_PID_CLEANED" == "yes" ]]; then
+        echo "stale_pid_cleaned=yes"
+        printf 'stale_pid=%s\\n' "$STALE_PID_VALUE"
+    else
+        echo "stale_pid_cleaned=no"
+    fi
+    if [[ -n "$recovery_reason" ]]; then
+        printf 'recovery_reason=%s\\n' "$recovery_reason"
     fi
     printf 'capture_dir=%s\\n' "$CAPTURE_DIR"
     printf 'log_file=%s\\n' "$LOG_FILE"
@@ -536,7 +660,9 @@ start_capture() {{
     fi
     mkdir -p "$(dirname "$OUTPUT")"
     local started_at
+    local start_boot_id
     started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    start_boot_id="$(current_boot_id)"
     local checksum_file="${{OUTPUT}}.sha256"
     local marker_file="${{OUTPUT}}.complete"
     rm -f "$checksum_file" "$marker_file"
@@ -550,9 +676,11 @@ start_capture() {{
         printf 'finished_at=\\n'
         printf 'last_result=starting\\n'
         printf 'last_exit_code=\\n'
+        printf 'boot_id=%s\\n' "$start_boot_id"
+        printf 'recovery_reason=\\n'
     }} > "$META_FILE"
 
-    export HELPER INTERFACE DURATION OUTPUT LOG_FILE META_FILE LAST_FILE PID_FILE started_at checksum_file marker_file
+    export HELPER INTERFACE DURATION OUTPUT LOG_FILE META_FILE LAST_FILE PID_FILE started_at start_boot_id checksum_file marker_file
     nohup bash -lc '
 set -euo pipefail
 rc=0
@@ -591,6 +719,8 @@ fi
     printf "finished_at=%s\\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf "last_result=%s\\n" "$result"
     printf "last_exit_code=%s\\n" "$rc"
+    printf "boot_id=%s\\n" "$start_boot_id"
+    printf "recovery_reason=\\n"
 }} > "$META_FILE"
 rm -f "$PID_FILE"
 exit "$rc"
@@ -620,10 +750,12 @@ stop_capture() {{
     if kill -0 "$pid" 2>/dev/null; then
         kill -TERM "$pid" 2>/dev/null || true
     fi
+    finalize_lifecycle_state "stopped" "130" "manual_stop"
     rm -f "$PID_FILE"
     printf 'service_status=stopped\\n'
     printf 'pid=%s\\n' "$pid"
     printf 'log_file=%s\\n' "$LOG_FILE"
+    printf 'recovery_reason=%s\\n' "manual_stop"
     if [[ -f "$LAST_FILE" ]]; then
         printf 'last_capture=%s\\n' "$(cat "$LAST_FILE")"
     fi
@@ -682,7 +814,8 @@ def _capture_agent_script(remote_root: str, capture_dir: str) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
-PROTOCOL="capture-agent/v1"
+PROTOCOL="{REMOTE_AGENT_PROTOCOL}"
+VERSION="{__version__}"
 REMOTE_ROOT={quoted_remote_root}
 CAPTURE_DIR={quoted_capture_dir}
 STATE_DIR="$REMOTE_ROOT/state"
@@ -857,7 +990,11 @@ run_doctor() {{
     printf 'agent=yes\\n' >> "$data_file"
     printf 'agent_path=%s\\n' "$0" >> "$data_file"
     printf 'agent_protocol=%s\\n' "$PROTOCOL" >> "$data_file"
+    printf 'agent_version=%s\\n' "$VERSION" >> "$data_file"
     printf 'control_mode=agent\\n' >> "$data_file"
+    printf 'remote_root=%s\\n' "$REMOTE_ROOT" >> "$data_file"
+    printf 'helper_version=%s\\n' "$VERSION" >> "$data_file"
+    printf 'service_version=%s\\n' "$VERSION" >> "$data_file"
     if [[ -f "$appliance_env" ]]; then
         cat "$appliance_env" >> "$data_file"
     else
@@ -1589,11 +1726,145 @@ def _run_remote_agent(
     return payload
 
 
+def _agent_payload_retryable(payload: Dict[str, object]) -> bool:
+    if payload.get("ok"):
+        return False
+    message = " ".join(
+        str(payload.get(key) or "")
+        for key in ("error", "stderr", "stdout")
+    ).lower()
+    return not any(marker in message for marker in ("missing_service", "missing_helper", "not found", "unknown argument"))
+
+
+def _run_remote_agent_with_retry(
+    source: RemoteSource,
+    remote_home: str,
+    *args: object,
+    attempts: int = REMOTE_RETRY_ATTEMPTS,
+) -> Dict[str, object]:
+    payload = _retry_remote_call(
+        lambda: _run_remote_agent(source, remote_home, *args),
+        should_retry=_agent_payload_retryable,
+        attempts=attempts,
+    )
+    return dict(payload or {})
+
+
 def _agent_data_map(payload: Dict[str, object]) -> Dict[str, str]:
     raw = payload.get("data")
     if not isinstance(raw, dict):
         return {}
     return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+
+
+def _probe_health_host(source_host: str) -> str:
+    value = str(source_host or "").strip()
+    if "@" in value:
+        return value.split("@", 1)[1].strip()
+    return value
+
+
+def _probe_remote_health(
+    source: RemoteSource,
+    *,
+    health_port: int,
+    user_hint: str,
+    timeout: float = 0.75,
+    attempts: int = 3,
+) -> Optional[Dict[str, str]]:
+    host = _probe_health_host(source.host)
+    for attempt in range(max(1, int(attempts))):
+        record = _probe_remote_appliance(host, health_port=health_port, timeout=timeout, user_hint=user_hint)
+        if record:
+            return record
+        if attempt + 1 < max(1, int(attempts)):
+            time.sleep(0.5)
+    return None
+
+
+def _bootstrap_validation_errors(
+    report: Dict[str, object],
+    *,
+    expected_profile: str,
+    expected_health_port: int,
+    expected_remote_root: str,
+    expected_capture_dir: str,
+) -> List[str]:
+    remote = dict(report.get("remote") or {})
+    errors: List[str] = []
+
+    if not remote.get("reachable"):
+        errors.append("Remote host is reachable over SSH, but post-bootstrap diagnostics did not complete.")
+        return errors
+
+    if not remote.get("agent"):
+        errors.append("Managed capture agent is missing after bootstrap.")
+    if not remote.get("agent_path"):
+        errors.append("Managed capture agent path was not reported after bootstrap.")
+    if str(remote.get("agent_protocol") or "") != REMOTE_AGENT_PROTOCOL:
+        errors.append(f"Managed capture agent protocol is incompatible: expected {REMOTE_AGENT_PROTOCOL}.")
+    agent_version = str(remote.get("agent_version") or "").strip()
+    if not agent_version:
+        errors.append("Managed capture agent version was not reported after bootstrap.")
+    elif agent_version != __version__:
+        errors.append(f"Managed capture agent version mismatch: expected {__version__}, got {agent_version}.")
+
+    if not remote.get("helper"):
+        errors.append("Remote capture helper is missing after bootstrap.")
+    if not remote.get("helper_path"):
+        errors.append("Remote capture helper path was not reported after bootstrap.")
+    if not remote.get("service"):
+        errors.append("Remote capture service is missing after bootstrap.")
+    if not remote.get("service_path"):
+        errors.append("Remote capture service path was not reported after bootstrap.")
+    if str(remote.get("service_status") or "missing") in ("missing", "failed"):
+        errors.append(f"Remote capture service is not healthy yet: {remote.get('service_status') or 'missing'}.")
+
+    if str(remote.get("privilege_mode") or "") not in ("sudoers_runner", "root_session"):
+        errors.append("Remote capture privileges are still not hardened; bootstrap needs a sudo-capable remote account.")
+
+    if not remote.get("state_dir_exists"):
+        errors.append("Remote state directory is missing after bootstrap.")
+    if not remote.get("state_dir_writable"):
+        errors.append("Remote state directory is not writable after bootstrap.")
+
+    if str(remote.get("remote_root") or expected_remote_root) != expected_remote_root:
+        errors.append(f"Remote root mismatch: expected {expected_remote_root}.")
+    if str(remote.get("capture_dir") or "") != expected_capture_dir:
+        errors.append(f"Remote capture directory mismatch: expected {expected_capture_dir}.")
+    if not remote.get("capture_dir_exists"):
+        errors.append("Remote capture directory is missing after bootstrap.")
+    if not remote.get("capture_dir_writable"):
+        errors.append("Remote capture directory is not writable after bootstrap.")
+
+    if expected_profile == "appliance":
+        if str(remote.get("install_profile") or "") != "appliance":
+            errors.append("Appliance profile was requested, but the remote node did not report appliance mode.")
+        if str(remote.get("health_port") or "") != str(expected_health_port):
+            errors.append(f"Remote health port mismatch: expected {expected_health_port}.")
+        if str(remote.get("health_path") or "") != "/health":
+            errors.append("Remote health path mismatch: expected /health.")
+        if not remote.get("health_endpoint"):
+            errors.append("Remote health endpoint was not reported after bootstrap.")
+        if remote.get("health_probe_ok") is not True:
+            errors.append("Remote health endpoint did not answer with a valid appliance payload.")
+        if str(remote.get("health_protocol") or "") != REMOTE_AGENT_PROTOCOL:
+            errors.append(f"Remote health endpoint protocol is incompatible: expected {REMOTE_AGENT_PROTOCOL}.")
+        health_agent_version = str(remote.get("health_agent_version") or "").strip()
+        if not health_agent_version:
+            errors.append("Remote health endpoint did not report an agent version.")
+        elif health_agent_version != __version__:
+            errors.append(f"Remote health endpoint version mismatch: expected {__version__}, got {health_agent_version}.")
+        if remote.get("health_socket_enabled") is not True:
+            errors.append("Remote health socket is not enabled after bootstrap.")
+        if remote.get("health_socket_active") is not True:
+            errors.append("Remote health socket is not active after bootstrap.")
+        if remote.get("appliance_service_enabled") is not True:
+            errors.append("Remote appliance service is not enabled after bootstrap.")
+        if remote.get("appliance_service_active") is not True:
+            errors.append("Remote appliance service is not active after bootstrap.")
+
+    return errors
 
 
 def _sha256_file(path: Path) -> str:
@@ -1610,7 +1881,7 @@ def _remote_artifact_info(
     remote_home: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     if remote_home:
-        payload = _run_remote_agent(source, remote_home, "artifact-info", "--path", remote_path)
+        payload = _run_remote_agent_with_retry(source, remote_home, "artifact-info", "--path", remote_path)
         info_map = _agent_data_map(payload)
         if payload.get("ok") and info_map:
             return info_map
@@ -1628,7 +1899,10 @@ def _remote_artifact_info(
         'else echo "checksum_file=no"; fi; '
         'printf "remote_size_bytes=%s\\n" "$(wc -c < "$FILE" | tr -d \' \')"'
     )
-    result = _run_remote(source, ["--", "sh", "-lc", script])
+    result = _retry_remote_call(
+        lambda: _run_remote(source, ["--", "sh", "-lc", script]),
+        should_retry=lambda outcome: outcome.returncode != 0,
+    )
     if result.returncode != 0:
         return None
     return _parse_key_value_output(result.stdout or "")
@@ -1679,6 +1953,96 @@ def _run_remote_service_action(
     )
 
 
+def _run_remote_service_action_with_retry(
+    source: RemoteSource,
+    remote_home: str,
+    action: str,
+    *,
+    interface: Optional[str] = None,
+    duration: Optional[int] = None,
+    output: Optional[str] = None,
+    attempts: int = REMOTE_RETRY_ATTEMPTS,
+) -> subprocess.CompletedProcess:
+    result = _retry_remote_call(
+        lambda: _run_remote_service_action(
+            source,
+            remote_home,
+            action,
+            interface=interface,
+            duration=duration,
+            output=output,
+        ),
+        should_retry=lambda outcome: _process_retryable(
+            outcome,
+            stop_markers=("missing_service", "missing_helper", "unknown argument"),
+        ),
+        attempts=attempts,
+    )
+    return result
+
+
+def _scp_pull_with_retry(
+    source: RemoteSource,
+    remote_path: str,
+    local_path: Path,
+    *,
+    attempts: int = REMOTE_RETRY_ATTEMPTS,
+) -> subprocess.CompletedProcess:
+    def _pull_once() -> subprocess.CompletedProcess:
+        local_path.unlink(missing_ok=True)
+        cmd = _scp_args(source) + [f"{source.host}:{remote_path}", str(local_path)]
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    result = _retry_remote_call(
+        _pull_once,
+        should_retry=lambda outcome: outcome.returncode != 0,
+        attempts=attempts,
+    )
+    return result
+
+
+def _rsync_pull_with_retry(
+    source: RemoteSource,
+    remote_path: str,
+    local_path: Path,
+    *,
+    attempts: int = REMOTE_RETRY_ATTEMPTS,
+) -> subprocess.CompletedProcess:
+    ssh_parts = _ssh_args(source)
+    ssh_parts.pop()  # rsync receives the remote host separately
+    remote_spec = f"{source.host}:{remote_path}"
+
+    def _pull_once() -> subprocess.CompletedProcess:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "rsync",
+            "--archive",
+            "--partial",
+            "--append-verify",
+            "--protect-args",
+            "-e",
+            " ".join(shlex.quote(part) for part in ssh_parts),
+            remote_spec,
+            str(local_path),
+        ]
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+    result = _retry_remote_call(
+        _pull_once,
+        should_retry=lambda outcome: outcome.returncode != 0,
+        attempts=attempts,
+    )
+    return result
+
+
+def _use_rsync_resume() -> bool:
+    return bool(shutil.which("rsync"))
+
+
+def _temporary_download_path(local_path: Path) -> Path:
+    return local_path.with_name(f"{local_path.name}.partial")
+
+
 def remote_service_host(
     config: Dict[str, object],
     action: str,
@@ -1705,7 +2069,7 @@ def remote_service_host(
         err("Could not determine the remote home directory over SSH.")
         return None
 
-    payload = _run_remote_agent(
+    payload = _run_remote_agent_with_retry(
         source,
         remote_home,
         "service",
@@ -1716,7 +2080,7 @@ def remote_service_host(
     )
     info_map = _agent_data_map(payload)
     if not payload.get("ok"):
-        result = _run_remote_service_action(
+        result = _run_remote_service_action_with_retry(
             source,
             remote_home,
             action,
@@ -1806,32 +2170,42 @@ def pull_remote_capture(
     source.dest_dir.mkdir(parents=True, exist_ok=True)
     filename = os.path.basename(remote_path.rstrip("/")) or "remote_capture.pcapng"
     local_path = source.dest_dir / filename
+    temp_path = _temporary_download_path(local_path)
 
-    cmd = _scp_args(source) + [f"{source.host}:{remote_path}", str(local_path)]
     info(f"Pulling {remote_path} from {source.host}")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    using_rsync = _use_rsync_resume()
+    if using_rsync:
+        result = _rsync_pull_with_retry(source, remote_path, temp_path)
+    else:
+        result = _scp_pull_with_retry(source, remote_path, temp_path)
     if result.returncode != 0:
-        err(result.stderr.strip() or result.stdout.strip() or "scp failed")
+        if not using_rsync:
+            temp_path.unlink(missing_ok=True)
+        err(result.stderr.strip() or result.stdout.strip() or "remote transfer failed")
         return None
 
     if artifact_info:
         remote_size_raw = str(artifact_info.get("remote_size_bytes") or "").strip()
         if remote_size_raw.isdigit():
             remote_size = int(remote_size_raw)
-            local_size = local_path.stat().st_size
+            local_size = temp_path.stat().st_size if temp_path.exists() else -1
             if local_size != remote_size:
-                local_path.unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
                 err(f"Pulled file size mismatch: remote={remote_size} bytes local={local_size} bytes")
                 return None
         checksum_value = str(artifact_info.get("checksum_value") or "").strip().lower()
         if checksum_value:
-            local_checksum = _sha256_file(local_path)
+            local_checksum = _sha256_file(temp_path)
             if local_checksum.lower() != checksum_value:
-                local_path.unlink(missing_ok=True)
+                temp_path.unlink(missing_ok=True)
                 err("Pulled file failed SHA-256 verification. The local copy was removed.")
                 return None
             ok("Verified remote capture checksum after transfer.")
 
+    if not temp_path.exists():
+        err("Remote capture transfer finished without a local file.")
+        return None
+    os.replace(temp_path, local_path)
     ok(f"Saved remote capture to {local_path}")
     return local_path
 
@@ -1865,17 +2239,23 @@ def pair_remote_host(
         return False
 
     info(f"Installing SSH key from {public_key} on {source.host}")
-    install_result = _run_remote(
-        source,
-        ["--", "sh", "-lc", _authorized_keys_script(key_text)],
-        capture_output=False,
-        text=False,
+    install_result = _retry_remote_call(
+        lambda: _run_remote(
+            source,
+            ["--", "sh", "-lc", _authorized_keys_script(key_text)],
+            capture_output=False,
+            text=False,
+        ),
+        should_retry=lambda outcome: outcome.returncode != 0,
     )
     if install_result.returncode != 0:
         err("Remote pairing failed while installing the SSH key.")
         return False
 
-    verify_result = _run_remote(source, ["--", "printf", "paired"])
+    verify_result = _retry_remote_call(
+        lambda: _run_remote(source, ["--", "printf", "paired"]),
+        should_retry=lambda outcome: outcome.returncode != 0 or "paired" not in (outcome.stdout or ""),
+    )
     if verify_result.returncode == 0 and "paired" in (verify_result.stdout or ""):
         ok("SSH key installed and passwordless SSH verified.")
     else:
@@ -1973,6 +2353,34 @@ def bootstrap_remote_host(
     else:
         info_map.setdefault("install_profile", "standard")
 
+    validation_config = dict(config)
+    validation_config["remote_install_profile"] = chosen_install_profile
+    validation_config["remote_health_port"] = chosen_health_port
+    validation_report = doctor_remote_host(
+        validation_config,
+        host=source.host,
+        port=source.port,
+        identity=source.identity,
+        interface=str(config.get("remote_interface") or "").strip() or None,
+    )
+    validation_errors = _bootstrap_validation_errors(
+        validation_report,
+        expected_profile=chosen_install_profile,
+        expected_health_port=chosen_health_port,
+        expected_remote_root=resolved_remote_root,
+        expected_capture_dir=resolved_capture_dir,
+    )
+    if validation_errors:
+        err("Remote bootstrap finished, but validation failed:")
+        for message in validation_errors:
+            err(f"  {message}")
+        return None
+
+    validated_remote = dict(validation_report.get("remote") or {})
+    info_map["agent_protocol"] = str(validated_remote.get("agent_protocol") or info_map.get("agent_protocol") or "")
+    info_map["agent_version"] = str(validated_remote.get("agent_version") or "")
+    info_map["health_probe_ok"] = "yes" if validated_remote.get("health_probe_ok") else "no"
+
     capture_script = info_map.get("capture_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-capture"
     service_script = info_map.get("service_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-service"
     agent_script = info_map.get("agent_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-agent"
@@ -1982,10 +2390,14 @@ def bootstrap_remote_host(
     info(f"Remote capture command : {capture_script} --interface wlan0 --duration 60")
     info(f"Remote service command : {service_script} status")
     info(f"Remote agent command  : {agent_script} doctor")
+    if info_map.get("agent_version"):
+        info(f"Remote agent version : {info_map['agent_version']}")
     info(f"Remote install mode   : {chosen_install_mode}")
     info(f"Remote install profile: {chosen_install_profile}")
     if info_map.get("health_endpoint"):
         info(f"Remote health endpoint: {info_map['health_endpoint']}")
+    if info_map.get("health_probe_ok") == "yes":
+        info("Remote health probe  : validated")
     info(f"Remote privilege mode : {privilege_mode}")
     if privilege_mode != "sudoers_runner":
         warn(
@@ -2048,7 +2460,7 @@ def start_remote_capture(
     if extra_args:
         warn("start-remote ignores extra tcpdump args when using the managed remote service.")
 
-    start_payload = _run_remote_agent(
+    start_payload = _run_remote_agent_with_retry(
         source,
         remote_home,
         "service",
@@ -2061,7 +2473,7 @@ def start_remote_capture(
     )
     start_info = _agent_data_map(start_payload)
     if not start_payload.get("ok"):
-        start_result = _run_remote_service_action(
+        start_result = _run_remote_service_action_with_retry(
             source,
             remote_home,
             "start",
@@ -2088,10 +2500,10 @@ def start_remote_capture(
     final_info = dict(start_info)
     while time.time() <= deadline:
         time.sleep(1)
-        status_payload = _run_remote_agent(source, remote_home, "service", "status")
+        status_payload = _run_remote_agent_with_retry(source, remote_home, "service", "status")
         final_info = _agent_data_map(status_payload)
         if not status_payload.get("ok"):
-            status_result = _run_remote_service_action(source, remote_home, "status")
+            status_result = _run_remote_service_action_with_retry(source, remote_home, "status")
             if status_result.returncode != 0:
                 message = str(status_payload.get("stderr") or status_payload.get("stdout") or "").strip()
                 if not message:
@@ -2118,6 +2530,16 @@ def start_remote_capture(
                 err(f"Remote capture service failed. Check the remote log: {log_file}")
             else:
                 err("Remote capture service failed.")
+        return None
+    if last_result == "stopped":
+        err("Remote capture was stopped before completion.")
+        return None
+    if last_result in ("interrupted", "interrupted_reboot"):
+        recovery_reason = str(final_info.get("recovery_reason") or "").strip()
+        if recovery_reason == "reboot" or last_result == "interrupted_reboot":
+            err("Remote capture was interrupted by a remote reboot. Re-run the capture after the appliance is fully back up.")
+        else:
+            err("Remote capture was interrupted before completion. The managed service cleaned up stale state; retry the capture.")
         return None
 
     remote_path = str(final_info.get("last_capture") or remote_path).strip()
@@ -2167,11 +2589,17 @@ def doctor_remote_host(
             "agent": False,
             "agent_path": "",
             "agent_protocol": "",
+            "agent_version": "",
             "control_mode": "legacy_shell",
+            "remote_root": "",
             "install_profile": "standard",
             "health_port": "",
             "health_path": "",
             "health_endpoint": "",
+            "health_probe_ok": None,
+            "health_protocol": "",
+            "health_agent_version": "",
+            "health_device_name": "",
             "health_service": "",
             "health_socket": "",
             "health_socket_enabled": None,
@@ -2181,9 +2609,17 @@ def doctor_remote_host(
             "appliance_service_active": None,
             "helper": False,
             "helper_path": "",
+            "helper_version": "",
             "service": False,
             "service_path": "",
+            "service_version": "",
             "service_status": "missing",
+            "last_result": "",
+            "last_exit_code": "",
+            "started_at": "",
+            "finished_at": "",
+            "recovery_reason": "",
+            "stale_pid_cleaned": False,
             "state_dir": "",
             "state_dir_exists": False,
             "state_dir_writable": False,
@@ -2199,6 +2635,8 @@ def doctor_remote_host(
             "remote_size_bytes": "",
             "interface": str(interface or config.get("remote_interface") or "").strip(),
             "interface_exists": None,
+            "protocol_compatible": None,
+            "version_compatible": None,
         },
     }
 
@@ -2281,7 +2719,9 @@ def doctor_remote_host(
         remote["agent"] = parsed.get("agent") == "yes"
         remote["agent_path"] = parsed.get("agent_path") or agent_path
         remote["agent_protocol"] = parsed.get("agent_protocol") or str(agent_payload.get("protocol") or "")
+        remote["agent_version"] = parsed.get("agent_version") or ""
         remote["control_mode"] = parsed.get("control_mode") or "agent"
+        remote["remote_root"] = parsed.get("remote_root") or remote_home
         remote["install_profile"] = parsed.get("install_profile") or "standard"
         remote["health_port"] = parsed.get("health_port") or ""
         remote["health_path"] = parsed.get("health_path") or ""
@@ -2300,9 +2740,17 @@ def doctor_remote_host(
         remote["tcpdump"] = parsed.get("tcpdump") == "yes"
         remote["helper"] = parsed.get("helper") == "yes"
         remote["helper_path"] = parsed.get("helper_path") or helper_path
+        remote["helper_version"] = parsed.get("helper_version") or ""
         remote["service"] = parsed.get("service") == "yes"
         remote["service_path"] = parsed.get("service_path") or service_path
+        remote["service_version"] = parsed.get("service_version") or ""
         remote["service_status"] = parsed.get("service_status") or "missing"
+        remote["last_result"] = parsed.get("last_result") or ""
+        remote["last_exit_code"] = parsed.get("last_exit_code") or ""
+        remote["started_at"] = parsed.get("started_at") or ""
+        remote["finished_at"] = parsed.get("finished_at") or ""
+        remote["recovery_reason"] = parsed.get("recovery_reason") or ""
+        remote["stale_pid_cleaned"] = parsed.get("stale_pid_cleaned") == "yes"
         remote["state_dir"] = parsed.get("state_dir") or state_dir
         remote["state_dir_exists"] = parsed.get("state_dir_exists") == "yes"
         remote["state_dir_writable"] = parsed.get("state_dir_writable") == "yes"
@@ -2334,7 +2782,14 @@ def doctor_remote_host(
             remote["service"] = parsed.get("service") == "yes"
             remote["service_path"] = parsed.get("service_path") or service_path
             remote["control_mode"] = "legacy_shell"
+            remote["remote_root"] = parsed.get("remote_root") or remote_home
             remote["service_status"] = parsed.get("service_status") or "missing"
+            remote["last_result"] = parsed.get("last_result") or ""
+            remote["last_exit_code"] = parsed.get("last_exit_code") or ""
+            remote["started_at"] = parsed.get("started_at") or ""
+            remote["finished_at"] = parsed.get("finished_at") or ""
+            remote["recovery_reason"] = parsed.get("recovery_reason") or ""
+            remote["stale_pid_cleaned"] = parsed.get("stale_pid_cleaned") == "yes"
             remote["state_dir"] = parsed.get("state_dir") or state_dir
             remote["state_dir_exists"] = parsed.get("state_dir_exists") == "yes"
             remote["state_dir_writable"] = parsed.get("state_dir_writable") == "yes"
@@ -2363,6 +2818,31 @@ def doctor_remote_host(
             remote["state_dir"] = state_dir
             remote["privileged_runner_path"] = privileged_runner_path
             remote["capture_dir"] = capture_dir
+            remote["remote_root"] = remote_home
+
+    remote["protocol_compatible"] = (
+        str(remote.get("agent_protocol") or "") == REMOTE_AGENT_PROTOCOL if remote.get("agent") else None
+    )
+    remote["version_compatible"] = (
+        str(remote.get("agent_version") or "") == __version__ if str(remote.get("agent_version") or "").strip() else None
+    )
+
+    if str(remote.get("install_profile") or "") == "appliance" and str(remote.get("health_port") or "").strip():
+        health_record = _probe_remote_health(
+            source,
+            health_port=int(str(remote.get("health_port") or DEFAULT_APPLIANCE_HEALTH_PORT)),
+            user_hint=str(config.get("remote_user") or "").strip(),
+        )
+        if health_record:
+            remote["health_probe_ok"] = True
+            remote["health_protocol"] = str(health_record.get("agent_protocol") or "")
+            remote["health_agent_version"] = str(health_record.get("agent_version") or "")
+            remote["health_device_name"] = str(health_record.get("device_name") or "")
+            remote["health_endpoint"] = str(health_record.get("health_endpoint") or remote.get("health_endpoint") or "")
+            if not remote.get("health_path"):
+                remote["health_path"] = str(health_record.get("health_path") or "")
+        else:
+            remote["health_probe_ok"] = False
 
     result["remote"] = remote
     interface_ok = True
@@ -2377,17 +2857,25 @@ def doctor_remote_host(
         appliance_ok = bool(
             str(remote.get("install_profile") or "") == "appliance"
             and bool(remote.get("health_endpoint"))
-            and remote.get("health_socket_enabled") is not False
-            and remote.get("appliance_service_enabled") is not False
+            and remote.get("health_probe_ok") is True
+            and str(remote.get("health_protocol") or "") == REMOTE_AGENT_PROTOCOL
+            and str(remote.get("health_agent_version") or "") == __version__
+            and remote.get("health_socket_enabled") is True
+            and remote.get("health_socket_active") is True
+            and remote.get("appliance_service_enabled") is True
+            and remote.get("appliance_service_active") is True
         )
     result["ok"] = bool(
         result["local"]["ssh"]
         and result["local"]["scp"]
         and remote["reachable"]
         and remote["agent"]
+        and remote.get("protocol_compatible") is True
+        and remote.get("version_compatible") is True
         and remote["tcpdump"]
         and remote["helper"]
         and remote["service"]
+        and str(remote.get("service_status") or "") in ("idle", "running", "stopped", "interrupted")
         and str(remote.get("privilege_mode") or "") in ("sudoers_runner", "root_session")
         and remote["state_dir_exists"]
         and remote["state_dir_writable"]

@@ -36,6 +36,12 @@ python scripts/release_gate.py \
 
 The release is only `fully validated` when that command exits successfully.
 
+The validation reports are expected to carry the capability-driven evidence that the CLI now emits:
+
+- local and remote validation reports should include `capability_report` and `status_bundle`
+- standalone validation reports should also include replay-confidence data from the smoke analysis path
+- sample analysis reports should include `selected_replay_confidence` and the selected stream's candidate metadata
+
 Tips:
 
 - Use clear sample names like `sample_text_analysis.json` or `sample_video_analysis.json`

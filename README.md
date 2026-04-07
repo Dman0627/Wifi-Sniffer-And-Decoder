@@ -4,7 +4,7 @@
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
 ![Supported modes](https://img.shields.io/badge/supported-ubuntu%20%7C%20pi%20standalone%20%7C%20windows%20remote-2d7d46.svg)
 
-Wi-Fi capture and analysis with a narrow, explicit support matrix. The official product modes are Ubuntu standalone, Raspberry Pi OS standalone, and Windows 10/11 paired with Ubuntu or Raspberry Pi OS for remote capture.
+Capability-driven Wi-Fi capture and pcap analysis with a narrow, explicit support matrix. This project is designed to tell you what the current machine can actually do, guide you onto the reliable supported paths, and stay honest when capture, WPA decrypt, extraction, or replay are limited.
 
 ## Start here
 
@@ -19,11 +19,26 @@ Read [`GETTING_STARTED.md`](GETTING_STARTED.md) for the copy-paste setup guide.
 
 ## What it does
 
+- Report machine, adapter, privilege, WPA, remote, and replay capability before you commit to a workflow
 - Capture live traffic or import an existing pcap/pcapng
 - Extract TCP and UDP streams and rank likely payload candidates
-- Run heuristic analysis and reconstruction
+- Run protocol-aware heuristic analysis and reconstruction
 - Track artifacts and results in a local web dashboard
 - Support Windows-first remote capture through an Ubuntu or Raspberry Pi OS device
+
+## What this repo promises
+
+- It tells you what is `supported`, `limited`, or `blocked` on the current machine instead of assuming the full workflow will work everywhere.
+- It is optimized for reliable supported paths: `Ubuntu standalone`, `Raspberry Pi OS standalone`, and `Windows controller/analyzer + Linux remote capture`.
+- It reports WPA readiness, remote appliance health, candidate confidence, and replay/export confidence in the CLI and dashboard before you invest time in a full run.
+- It exports honest artifacts for unknown payload families instead of pretending every stream is replayable.
+
+## What it does not promise
+
+- It is not a universal decoder for arbitrary Wi-Fi traffic.
+- It does not make native Windows monitor-mode capture equivalent to Linux monitor-mode support.
+- It does not bypass WPA requirements; decrypt remains conditional on real capture artifacts, usable credentials, and the required external toolchain.
+- It does not guarantee meaningful extraction or replay for opaque or unsupported payload families; those fall back to ranked candidates plus raw/exported artifacts.
 
 ## Official support matrix
 
@@ -50,6 +65,14 @@ python videopipeline.py web
 python videopipeline.py all
 ```
 
+Use these commands as the capability and readiness path:
+
+- `deps`: verifies required tooling on the current host
+- `hardware`: reports what this machine, adapter, and privilege mode can actually do
+- `preflight`: explains whether the selected pipeline path is supported, limited, or blocked
+- `crack-status`: explains WPA artifact and decrypt readiness instead of guessing
+- `doctor`: validates the remote appliance path before a remote capture run
+
 Official Windows remote-flow commands:
 
 ```powershell
@@ -66,6 +89,7 @@ python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 -
 - Qualified Windows role: `controller/analyzer + Linux remote capture`
 - Replay and decoding are intentionally classified as `guaranteed`, `high_confidence`, `heuristic`, or `unsupported`
 - WPA readiness is explicitly reported instead of guessed; use `crack-status` before assuming decrypt will work
+- Unknown or unsupported payload families are exported with metadata instead of being presented as successful replay
 
 ## Development
 

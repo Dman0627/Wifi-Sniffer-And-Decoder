@@ -16,10 +16,12 @@ from .environment import (
     IS_LINUX,
     IS_MACOS,
     IS_WINDOWS,
+    build_capability_report,
     command_support,
     check_environment,
     hardware_qualification_report,
     list_interfaces,
+    print_capability_hardware,
     print_hardware_qualification,
     resolve_product_profile,
 )
@@ -41,6 +43,7 @@ from .remote import (
     start_remote_capture,
     watch_remote_capture,
 )
+from .status_language import build_surface_status_bundle
 from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
     ask, ask_int, banner, choose, confirm, done, err, info, ok, section, warn,
@@ -116,6 +119,17 @@ def _status_label(condition: bool, when_true: str, when_false: str = "missing") 
     return f"{RED}{when_false}{RESET}"
 
 
+def _status_badge(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value in ("supported", "ready"):
+        return f"{GREEN}{value}{RESET}"
+    if value in ("limited", "warning", "heuristic"):
+        return f"{YELLOW}{value}{RESET}"
+    if value == "running":
+        return f"{CYAN}running{RESET}"
+    return f"{RED}{value or 'blocked'}{RESET}"
+
+
 def _command_support_suffix(config: Dict[str, object], command: str, *, has_input_pcap: bool = False) -> str:
     support = command_support(command, config, has_input_pcap=has_input_pcap)
     if support.status == "experimental":
@@ -185,7 +199,7 @@ def _active_validation_label(config: Dict[str, object]) -> str:
 
 
 def run_hardware(config: Dict[str, object]) -> bool:
-    print_hardware_qualification(config)
+    print_capability_hardware(build_capability_report(config))
     return True
 
 
@@ -566,12 +580,18 @@ def _print_remote_doctor(report: Dict[str, object]) -> None:
         service_label = f"{YELLOW}running{RESET}"
     elif service_state == "idle":
         service_label = _status_label(True, "ready")
+    elif service_state == "stopped":
+        service_label = f"{YELLOW}stopped{RESET}"
+    elif service_state == "interrupted":
+        service_label = f"{YELLOW}interrupted{RESET}"
     elif service_state == "failed":
         service_label = _status_label(False, "ready", "failed")
     else:
         service_label = _status_label(False, "ready", "missing")
     print(f"    Service          : {_status_label(bool(remote.get('service')), 'present', 'missing')}")
     print(f"    Service status   : {service_label}")
+    if remote.get("recovery_reason"):
+        print(f"    Recovery reason  : {remote.get('recovery_reason')}")
     if remote.get("service_path"):
         print(f"    Service path     : {remote.get('service_path')}")
     state_dir = str(remote.get("state_dir") or "")
@@ -649,6 +669,18 @@ def run_doctor(
     return bool(local_ok and report.get("ok"))
 
 
+def _validation_reporting_artifacts(
+    config: Dict[str, object],
+    *,
+    detection_report: Optional[Dict[str, object]] = None,
+    analysis_report: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    return {
+        "capability_report": build_capability_report(config).to_dict(),
+        "status_bundle": build_surface_status_bundle(config, detection_report, analysis_report),
+    }
+
+
 def run_validate_remote(
     config: Dict[str, object],
     host: Optional[str] = None,
@@ -666,6 +698,13 @@ def run_validate_remote(
     target_duration = int(duration if duration is not None else min(max(int(config.get("capture_duration", 60) or 60), 10), 30))
     report_file = Path(report_path).resolve() if report_path else _validation_report_path(config)
     report_file.parent.mkdir(parents=True, exist_ok=True)
+    validation_config = dict(config)
+    if target_host:
+        validation_config["remote_host"] = target_host
+    if target_interface:
+        validation_config["remote_interface"] = target_interface
+    if port is not None:
+        validation_config["remote_port"] = int(port)
 
     validation: Dict[str, object] = {
         "schema_version": 1,
@@ -681,6 +720,8 @@ def run_validate_remote(
         },
         "environment_ok": False,
         "hardware_qualification": [],
+        "capability_report": {},
+        "status_bundle": {},
         "doctor": {},
         "service_status_before": {},
         "smoke_capture": {
@@ -709,6 +750,7 @@ def run_validate_remote(
         }
         for row in hardware_qualification_report(config)
     ]
+    validation.update(_validation_reporting_artifacts(validation_config))
 
     doctor_report = doctor_remote_host(
         config,
@@ -851,8 +893,11 @@ def run_validate_local(
             "detection_report_path": str(_detection_report_path(config)),
             "analysis_report_path": str(_analysis_report_path(config)),
             "selected_protocol_support": {},
+            "selected_replay_confidence": {},
             "analysis_preflight": {},
         },
+        "capability_report": {},
+        "status_bundle": {},
         "overall_ok": False,
     }
 
@@ -871,6 +916,7 @@ def run_validate_local(
         }
         for row in hardware_qualification_report(smoke_config)
     ]
+    validation.update(_validation_reporting_artifacts(smoke_config))
 
     if not target_interface:
         warn("No local capture interface is configured for standalone validation.")
@@ -902,9 +948,13 @@ def run_validate_local(
                     validation["processing_smoke"]["selected_protocol_support"] = dict(
                         analysis.get("selected_protocol_support") or {}
                     )
+                    validation["processing_smoke"]["selected_replay_confidence"] = dict(
+                        analysis.get("selected_replay_confidence") or {}
+                    )
                     validation["processing_smoke"]["analysis_preflight"] = dict(
                         analysis.get("feasibility") or {}
                     )
+                validation.update(_validation_reporting_artifacts(smoke_config, detection_report=detection, analysis_report=analysis))
             else:
                 warn("Standalone smoke capture did not produce a readable pcap.")
         else:
@@ -942,6 +992,12 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     analysis = _load_json(analysis_path)
     corpus_status = CorpusStore(config).status()
     candidate = detection.get("selected_candidate_stream") if detection else None
+    status_bundle = build_surface_status_bundle(config, detection, analysis)
+    machine_summary = dict(status_bundle.get("machine_summary") or {})
+    machine_items = list(machine_summary.get("items") or [])
+    workflow_rows = list(status_bundle.get("workflow") or [])
+    replay_status = dict(status_bundle.get("replay") or {})
+    wpa_status = dict(status_bundle.get("wpa") or {})
 
     interface = str(config.get("interface") or "").strip() or f"{RED}unset{RESET}"
     magic = str(config.get("custom_magic_hex") or "").strip() or f"{DIM}(none){RESET}"
@@ -962,6 +1018,19 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     print(f"    Replay Hint      : {config.get('replay_format_hint') or config.get('video_codec') or 'raw'}")
     print(f"    Corpus Reuse     : review {config.get('corpus_review_threshold', 0.62)} / auto {config.get('corpus_auto_reuse_threshold', 0.88)}")
 
+    print(f"\n  {BOLD}What This Machine Can Do{RESET}")
+    if machine_summary.get("headline"):
+        print(f"    Profile          : {_shorten(str(machine_summary.get('headline')), 84)}")
+    for item in machine_items:
+        print(f"    {str(item.get('label') or ''):<16} {_status_badge(str(item.get('status') or 'blocked'))}")
+        print(f"      {_shorten(str(item.get('summary') or ''), 88)}")
+        reason = str(item.get("reason") or "").strip()
+        next_step = str(item.get("next_step") or "").strip()
+        if reason:
+            print(f"      note : {_shorten(reason, 88)}")
+        if next_step:
+            print(f"      next : {_shorten(next_step, 88)}")
+
     print(f"\n  {BOLD}Wi-Fi / Piracy Pipeline{RESET}")
     print(f"    AP ESSID         : {config.get('ap_essid') or f'{DIM}(unset){RESET}'}")
     print(f"    AP BSSID         : {config.get('ap_bssid') or f'{DIM}(unset){RESET}'}")
@@ -970,9 +1039,10 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     print(f"    Wordlist         : {config.get('wordlist_path') or f'{DIM}(unset){RESET}'}")
     wpa_available = bool(resolve_wpa_password(config))
     print(f"    WPA Password     : {_status_label(wpa_available, 'set (env/session)', 'not set')}")
-    wpa_state = Capture(config).inspect_wpa_crack_path(str(handshake) if handshake else None)
-    wpa_state_text = wpa_state.state.replace("_", " ")
-    print(f"    WPA Path         : {wpa_state_text}")
+    print(f"    WPA Path         : {_status_badge(str(wpa_status.get('status') or 'blocked'))}")
+    print(f"    WPA Summary      : {_shorten(str(wpa_status.get('summary') or 'WPA readiness has not been evaluated yet.'), 84)}")
+    if wpa_status.get("next_steps"):
+        print(f"    WPA Next         : {_shorten(str(wpa_status['next_steps'][0]), 84)}")
 
     print(f"\n  {BOLD}Artifacts{RESET}")
     print(f"    Capture          : {_status_label(capture_path.exists(), 'ready')}")
@@ -1000,24 +1070,50 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     if latest_entry:
         print(f"    Latest Entry     : {_shorten(str(latest_entry.get('entry_id') or ''), 84)}")
 
+    print(f"\n  {BOLD}Workflow Capabilities{RESET}")
+    for row in workflow_rows:
+        print(f"    {str(row.get('area') or ''):<30} {_status_badge(str(row.get('status') or 'blocked'))}")
+        print(f"      {_shorten(str(row.get('summary') or row.get('detail') or ''), 88)}")
+        reasons = list(row.get("reasons") or [])
+        next_steps = list(row.get("next_steps") or [])
+        if reasons:
+            print(f"      reason: {_shorten(str(reasons[0]), 88)}")
+        if next_steps:
+            print(f"      next  : {_shorten(str(next_steps[0]), 88)}")
+
     if analysis:
         hypotheses = analysis.get("hypotheses", [])
         hypothesis = str(hypotheses[0].get("name") or "") if hypotheses else ""
         replay_support = dict(analysis.get("selected_protocol_support") or {})
-        feasibility = dict(analysis.get("feasibility") or {})
-        replay_feasibility = dict(feasibility.get("replay") or {})
+        replay_confidence = dict(replay_status.get("confidence") or {})
         print(f"\n  {BOLD}Latest Analysis{RESET}")
         print(f"    Units Analyzed   : {analysis.get('total_units', 0)}")
         print(f"    Entropy          : {analysis.get('ciphertext_observations', {}).get('average_entropy', '?')}")
         print(f"    Lead Hypothesis  : {hypothesis or f'{DIM}(none){RESET}'}")
         if replay_support:
             print(
-                f"    Replay Support   : "
+                f"    Decode / Replay  : "
+                f"{replay_support.get('decode_level', 'heuristic')} / "
                 f"{replay_support.get('replay_level', 'unsupported')} "
                 f"({replay_support.get('dominant_unit_type', 'opaque_chunk')})"
             )
-        if replay_feasibility:
-            print(f"    Preflight        : {replay_feasibility.get('status', 'blocked')}")
+        print(f"    Replay Path      : {_status_badge(str(replay_status.get('status') or 'blocked'))}")
+        print(f"    Replay Summary   : {_shorten(str(replay_status.get('summary') or 'Run analyze to evaluate replay readiness.'), 84)}")
+        if replay_confidence:
+            print(
+                f"    Replay Confidence: "
+                f"{replay_confidence.get('confidence_band', 'low')} "
+                f"[{replay_confidence.get('confidence_label', 'unknown')}, score={replay_confidence.get('confidence_score', '?')}]"
+            )
+        blockers = list(replay_status.get("blockers") or [])
+        warnings = list(replay_status.get("warnings") or [])
+        next_steps = list(replay_status.get("next_steps") or [])
+        if blockers:
+            print(f"    Top Blocker      : {_shorten(str(blockers[0]), 84)}")
+        elif warnings:
+            print(f"    Top Caveat       : {_shorten(str(warnings[0]), 84)}")
+        if next_steps:
+            print(f"    Next Step        : {_shorten(str(next_steps[0]), 84)}")
         corpus = analysis.get("corpus") or {}
         best_match = corpus.get("best_match") or {}
         if best_match:
@@ -1063,6 +1159,10 @@ def _show_report_summary(config: Dict[str, object]) -> None:
     section("Latest Reports")
     detection = _load_json(_detection_report_path(config))
     analysis = _load_json(_analysis_report_path(config))
+    status_bundle = build_surface_status_bundle(config, detection, analysis)
+    machine_summary = dict(status_bundle.get("machine_summary") or {})
+    replay_status = dict(status_bundle.get("replay") or {})
+    wpa_status = dict(status_bundle.get("wpa") or {})
 
     if detection:
         selected = detection.get("selected_candidate_stream") or {}
@@ -1074,7 +1174,7 @@ def _show_report_summary(config: Dict[str, object]) -> None:
         print(f"    Candidate Class  : {selected.get('candidate_class', '(none)')}")
         if support:
             print(
-                f"    Decode/Replay    : "
+                f"    Decode / Replay  : "
                 f"{support.get('decode_level', 'heuristic')} / {support.get('replay_level', 'unsupported')}"
             )
     else:
@@ -1084,16 +1184,30 @@ def _show_report_summary(config: Dict[str, object]) -> None:
         selected = analysis.get("selected_candidate_stream") or {}
         hypotheses = analysis.get("hypotheses", [])
         recommendations = analysis.get("recommendations", [])
-        feasibility = dict(analysis.get("feasibility") or {})
-        replay_feasibility = dict(feasibility.get("replay") or {})
+        replay_confidence = dict(replay_status.get("confidence") or {})
         print(f"\n  {BOLD}Analysis{RESET}")
         print(f"    Units Analyzed   : {analysis.get('total_units', 0)}")
         print(f"    Chi-Squared      : {analysis.get('ciphertext_observations', {}).get('chi_squared', '?')}")
         print(f"    Selected Stream  : {_shorten(str(selected.get('stream_id') or '(none)'), 84)}")
         if hypotheses:
             print(f"    Top Hypothesis   : {hypotheses[0].get('name', '(none)')}")
-        if replay_feasibility:
-            print(f"    Preflight        : {replay_feasibility.get('status', 'blocked')}")
+        print(f"    Replay Path      : {_status_badge(str(replay_status.get('status') or 'blocked'))}")
+        print(f"    Replay Summary   : {_shorten(str(replay_status.get('summary') or 'Run analyze to evaluate replay readiness.'), 84)}")
+        if replay_confidence:
+            print(
+                f"    Replay Confidence: "
+                f"{replay_confidence.get('confidence_band', 'low')} "
+                f"[{replay_confidence.get('confidence_label', 'unknown')}, score={replay_confidence.get('confidence_score', '?')}]"
+            )
+        blockers = list(replay_status.get("blockers") or [])
+        warnings = list(replay_status.get("warnings") or [])
+        next_steps = list(replay_status.get("next_steps") or [])
+        if blockers:
+            print(f"    Top Blocker      : {_shorten(str(blockers[0]), 84)}")
+        elif warnings:
+            print(f"    Top Caveat       : {_shorten(str(warnings[0]), 84)}")
+        if next_steps:
+            print(f"    Next Step        : {_shorten(str(next_steps[0]), 84)}")
         if recommendations:
             print(f"    Recommendation   : {_shorten(str(recommendations[0]), 84)}")
         corpus = analysis.get("corpus") or {}
@@ -1107,6 +1221,29 @@ def _show_report_summary(config: Dict[str, object]) -> None:
             print(f"    Reused Material  : yes")
     else:
         warn("No analysis report found yet.")
+
+    print(f"\n  {BOLD}WPA Path{RESET}")
+    print(f"    Status           : {_status_badge(str(wpa_status.get('status') or 'ready'))}")
+    print(f"    Summary          : {_shorten(str(wpa_status.get('summary') or 'WPA feasibility is not relevant to the current workflow.'), 84)}")
+    reasons = list(wpa_status.get("reasons") or [])
+    next_steps = list(wpa_status.get("next_steps") or [])
+    if reasons:
+        print(f"    Detail           : {_shorten(str(reasons[0]), 84)}")
+    if next_steps:
+        print(f"    Next Step        : {_shorten(str(next_steps[0]), 84)}")
+
+    print(f"\n  {BOLD}What This Machine Can Do{RESET}")
+    if machine_summary.get("headline"):
+        print(f"    Profile          : {_shorten(str(machine_summary.get('headline')), 84)}")
+    for item in list(machine_summary.get("items") or []):
+        print(f"    {str(item.get('label') or ''):<16} {_status_badge(str(item.get('status') or 'blocked'))}")
+        print(f"      {_shorten(str(item.get('summary') or ''), 88)}")
+        reason = str(item.get("reason") or "").strip()
+        next_step = str(item.get("next_step") or "").strip()
+        if reason:
+            print(f"      note : {_shorten(reason, 88)}")
+        if next_step:
+            print(f"      next : {_shorten(next_step, 88)}")
 
 
 def _show_candidate_streams(config: Dict[str, object], limit: int = 10) -> list[Dict[str, object]]:

@@ -27,6 +27,63 @@ def _row_status(rows: Sequence[Dict[str, object]], *, area: str) -> List[str]:
     return [str(row.get("status") or "") for row in rows if str(row.get("area") or "") == area]
 
 
+def _validate_capability_artifacts(
+    report: Dict[str, object],
+    *,
+    expected_target: str,
+    blockers: List[str],
+) -> None:
+    capability_report = dict(report.get("capability_report") or {})
+    if not capability_report:
+        blockers.append("capability_report is missing.")
+        return
+
+    platform = dict(capability_report.get("platform") or {})
+    if str(platform.get("product_profile_label") or "") != expected_target:
+        blockers.append(f"capability_report.platform.product_profile_label is {platform.get('product_profile_label')!r}, expected {expected_target!r}.")
+    if not str(capability_report.get("privilege_mode") or "").strip():
+        blockers.append("capability_report.privilege_mode is missing.")
+    if not list(capability_report.get("capture_methods") or []):
+        blockers.append("capability_report.capture_methods is empty.")
+    if not list(capability_report.get("replay_families") or []):
+        blockers.append("capability_report.replay_families is empty.")
+
+    wpa = dict(capability_report.get("wpa") or {})
+    if not str(wpa.get("status") or "").strip():
+        blockers.append("capability_report.wpa.status is missing.")
+
+    remote = dict(capability_report.get("remote") or {})
+    if not str(remote.get("status") or "").strip():
+        blockers.append("capability_report.remote.status is missing.")
+
+    status_bundle = dict(report.get("status_bundle") or {})
+    if not status_bundle:
+        blockers.append("status_bundle is missing.")
+        return
+
+    machine_summary = dict(status_bundle.get("machine_summary") or {})
+    machine_items = list(machine_summary.get("items") or [])
+    if not str(machine_summary.get("headline") or "").strip():
+        blockers.append("status_bundle.machine_summary.headline is missing.")
+    expected_machine_keys = {"local_capture", "monitor_capture", "wpa", "remote_capture", "replay_export"}
+    seen_machine_keys = {str(item.get("key") or "") for item in machine_items if isinstance(item, dict)}
+    missing_machine_keys = sorted(expected_machine_keys - seen_machine_keys)
+    if missing_machine_keys:
+        blockers.append(f"status_bundle.machine_summary.items is missing keys: {', '.join(missing_machine_keys)}.")
+
+    workflow = list(status_bundle.get("workflow") or [])
+    if not workflow:
+        blockers.append("status_bundle.workflow is empty.")
+
+    replay = dict(status_bundle.get("replay") or {})
+    if not str(replay.get("status") or "").strip():
+        blockers.append("status_bundle.replay.status is missing.")
+
+    wpa_status = dict(status_bundle.get("wpa") or {})
+    if not str(wpa_status.get("status") or "").strip():
+        blockers.append("status_bundle.wpa.status is missing.")
+
+
 def _evaluate_linux_validation(path: Path, expected_target: str) -> Dict[str, object]:
     report = _read_json(path)
     blockers: List[str] = []
@@ -52,6 +109,8 @@ def _evaluate_linux_validation(path: Path, expected_target: str) -> Dict[str, ob
     if not bool(report.get("overall_ok")):
         blockers.append("overall_ok is not true.")
 
+    _validate_capability_artifacts(report, expected_target=expected_target, blockers=blockers)
+
     processing = dict(report.get("processing_smoke") or {})
     if not bool(processing.get("success")):
         blockers.append("processing_smoke.success is not true.")
@@ -75,6 +134,17 @@ def _evaluate_linux_validation(path: Path, expected_target: str) -> Dict[str, ob
         warnings.append("analysis_preflight.replay.status is limited.")
     elif not replay_status:
         blockers.append("analysis_preflight.replay.status is missing.")
+
+    replay_confidence = dict(processing.get("selected_replay_confidence") or {})
+    if not replay_confidence:
+        blockers.append("processing_smoke.selected_replay_confidence is missing.")
+    else:
+        if not str(replay_confidence.get("handler_id") or "").strip():
+            blockers.append("processing_smoke.selected_replay_confidence.handler_id is missing.")
+        if not str(replay_confidence.get("confidence_label") or "").strip():
+            blockers.append("processing_smoke.selected_replay_confidence.confidence_label is missing.")
+        if "supported" not in replay_confidence:
+            blockers.append("processing_smoke.selected_replay_confidence.supported is missing.")
 
     return {
         "path": str(path),
@@ -108,6 +178,8 @@ def _evaluate_windows_validation(path: Path) -> Dict[str, object]:
         blockers.append("environment_ok is not true.")
     if not bool(report.get("overall_ok")):
         blockers.append("overall_ok is not true.")
+
+    _validate_capability_artifacts(report, expected_target=expected_target, blockers=blockers)
 
     doctor = dict(report.get("doctor") or {})
     if not bool(doctor.get("ok")):
@@ -171,6 +243,22 @@ def _evaluate_sample_analysis(path: Path) -> Dict[str, object]:
     candidate = dict(report.get("candidate_material") or {})
     if not candidate:
         blockers.append("candidate_material is empty.")
+
+    selected_stream = dict(report.get("selected_candidate_stream") or {})
+    candidate_metadata = dict(selected_stream.get("candidate_metadata") or {})
+    if not candidate_metadata:
+        blockers.append("selected_candidate_stream.candidate_metadata is missing.")
+
+    replay_confidence = dict(report.get("selected_replay_confidence") or {})
+    if not replay_confidence:
+        blockers.append("selected_replay_confidence is missing.")
+    else:
+        if not str(replay_confidence.get("handler_id") or "").strip():
+            blockers.append("selected_replay_confidence.handler_id is missing.")
+        if not str(replay_confidence.get("confidence_label") or "").strip():
+            blockers.append("selected_replay_confidence.confidence_label is missing.")
+        if "supported" not in replay_confidence:
+            blockers.append("selected_replay_confidence.supported is missing.")
 
     return {
         "path": str(path),

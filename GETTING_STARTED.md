@@ -23,6 +23,15 @@ If you are on Windows, use PowerShell.
 
 If you are on Ubuntu or Raspberry Pi OS, use a normal shell.
 
+## What to expect from this project
+
+This repo is built around capability reporting and supported paths, not around promising that every machine or every capture can be decoded.
+
+- Start with the path that matches your OS and hardware instead of assuming every workflow is available everywhere.
+- Use `deps`, `hardware`, `doctor`, `preflight`, and `crack-status` when you want the project to tell you what is supported, limited, or blocked on this machine.
+- The most reliable workflows keep raw capture on Linux, either locally on Ubuntu or Raspberry Pi OS or remotely from Windows.
+- Extraction and replay are confidence-based. Known families can reconstruct or export cleanly; unknown families may only produce ranked candidates and raw exported artifacts.
+
 ## The easiest path for most Windows users
 
 Use Windows as the controller and analyzer, and let a second device running Ubuntu or Raspberry Pi OS handle capture.
@@ -111,6 +120,7 @@ Notes:
 - `discover-remote` looks for appliance-style Linux capture nodes from their health endpoint
 - `bootstrap-remote` installs the managed capture agent and remote helper scripts
 - `doctor` is the fastest way to find SSH, privilege, or interface issues before a live run
+- `doctor` and `preflight` are capability-driven, so they will tell you whether the current remote path is supported, limited, or blocked
 - `remote-service status`, `remote-service start`, and `remote-service last-capture` are useful when you want to control the appliance directly
 
 ## Ubuntu standalone
@@ -218,6 +228,8 @@ python3 videopipeline.py play
 
 This is the easiest way to try the project without setting up live capture first.
 
+Keep in mind that importing a pcap does not guarantee a meaningful decode. The pipeline will rank candidate streams, explain the confidence it has in them, and only claim replay or export support for known payload families.
+
 ## What the helper scripts do
 
 | Script | Use it for |
@@ -294,6 +306,14 @@ python3 videopipeline.py deps
 python3 videopipeline.py hardware
 python3 videopipeline.py preflight
 ```
+
+What those checks are for:
+
+- `deps`: confirms the local toolchain is present
+- `hardware`: reports adapter, privilege, monitor-mode, remote, and replay capability for this machine
+- `doctor`: validates the managed remote appliance path
+- `preflight`: tells you whether the configured run is supported, limited, or blocked
+- `crack-status`: tells you whether WPA decrypt is actually ready or still missing required artifacts or tools
 
 ## If you want the guided menu
 

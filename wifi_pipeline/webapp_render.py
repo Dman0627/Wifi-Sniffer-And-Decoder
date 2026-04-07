@@ -4,6 +4,8 @@ import html
 import time
 from typing import Dict
 
+from .status_language import status_pill_class
+
 
 def _html_text(value: object) -> str:
     return html.escape(str(value or ""))
@@ -16,17 +18,39 @@ def _shorten(value: object, width: int = 96) -> str:
     return text[: width - 3] + "..."
 
 
+def _render_note_list(items: object, *, empty: str, css_class: str = "muted") -> str:
+    values = [str(item or "").strip() for item in list(items or []) if str(item or "").strip()]
+    if not values:
+        return f"<p class='{css_class}'>{_html_text(empty)}</p>"
+    rows = "".join(f"<li>{_html_text(_shorten(value, 140))}</li>" for value in values)
+    return f"<ul class='note-list {css_class}'>{rows}</ul>"
+
+
+def _render_machine_line(label: str, value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return f"<p class='muted'>{_html_text(label)}: {_html_text(_shorten(text, 140))}</p>"
+
+
 def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> str:
     config = dict(snapshot.get("config") or {})
     bundle = dict(snapshot.get("bundle") or {})
     detection = dict(bundle.get("detection") or {})
     analysis = dict(bundle.get("analysis") or {})
+    status_bundle = dict(bundle.get("status_bundle") or {})
     candidate_rows = list(bundle.get("candidate_rows") or [])
     corpus_entries = list(bundle.get("corpus_entries") or [])
     corpus_status = dict(bundle.get("corpus_status") or {})
     logs = list(snapshot.get("logs") or [])
     interfaces = list(bundle.get("interfaces") or [])
     artifacts = list(bundle.get("artifacts") or [])
+    workflow_rows = list(status_bundle.get("workflow") or [])
+    machine_summary = dict(status_bundle.get("machine_summary") or {})
+    machine_items = list(machine_summary.get("items") or [])
+    selection_status = dict(status_bundle.get("selection") or {})
+    replay_status = dict(status_bundle.get("replay") or {})
+    wpa_status = dict(status_bundle.get("wpa") or {})
     busy = bool(snapshot.get("busy"))
     current_action = str(snapshot.get("current_action") or "")
     last_message = str(snapshot.get("last_message") or "")
@@ -35,6 +59,33 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
     selected_analysis = dict(analysis.get("selected_candidate_stream") or {})
     analysis_corpus = dict(analysis.get("corpus") or {})
     best_match = dict(analysis_corpus.get("best_match") or {})
+    replay_confidence = dict(replay_status.get("confidence") or {})
+
+    workflow_cards_html = "".join(
+        (
+            "<article class='status-card'>"
+            f"<header><strong>{_html_text(row.get('area'))}</strong> "
+            f"<span class='pill {status_pill_class(str(row.get('status') or 'blocked'))}'>{_html_text(row.get('status') or 'blocked')}</span></header>"
+            f"<p>{_html_text(row.get('summary') or row.get('detail') or '')}</p>"
+            f"{_render_note_list(row.get('reasons'), empty='', css_class='muted') if list(row.get('reasons') or []) else ''}"
+            f"{_render_note_list(row.get('next_steps'), empty='', css_class='muted') if list(row.get('next_steps') or []) else ''}"
+            "</article>"
+        )
+        for row in workflow_rows
+    ) or "<p class='muted'>No capability rows are available yet.</p>"
+
+    machine_cards_html = "".join(
+        (
+            "<article class='status-card'>"
+            f"<header><strong>{_html_text(item.get('label'))}</strong> "
+            f"<span class='pill {status_pill_class(str(item.get('status') or 'blocked'))}'>{_html_text(item.get('status') or 'blocked')}</span></header>"
+            f"<p>{_html_text(item.get('summary') or '')}</p>"
+            f"{_render_machine_line('Note', item.get('reason'))}"
+            f"{_render_machine_line('Next', item.get('next_step'))}"
+            "</article>"
+        )
+        for item in machine_items
+    ) or "<p class='muted'>No machine summary is available yet.</p>"
 
     log_blocks = []
     for entry in reversed(logs[-6:]):
@@ -101,6 +152,8 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         capture_path=capture_path,
         interface_options="".join(interface_options),
         artifact_cards=artifact_cards,
+        machine_summary_headline=str(machine_summary.get("headline") or ""),
+        machine_cards_html=machine_cards_html,
         candidate_rows_html=candidate_rows_html,
         corpus_rows_html=corpus_rows_html,
         log_blocks="".join(log_blocks) or "<p class='muted'>No actions have been run from the dashboard yet.</p>",
@@ -141,6 +194,50 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         chi_squared=str((analysis.get("ciphertext_observations") or {}).get("chi_squared") or "?"),
         total_units=str(analysis.get("total_units") or 0),
         recommendation=_shorten((analysis.get("recommendations") or ["(none)"])[0], 90),
+        selection_status=str(selection_status.get("status") or "blocked"),
+        selection_status_class=status_pill_class(str(selection_status.get("status") or "blocked")),
+        selection_summary=_shorten(selection_status.get("summary") or "Run analyze to evaluate replay readiness.", 120),
+        selection_decode_level=str(selection_status.get("decode_level") or "heuristic"),
+        selection_replay_level=str(selection_status.get("replay_level") or "unsupported"),
+        selection_unit_type=str(selection_status.get("dominant_unit_type") or "opaque_chunk"),
+        selection_signal_strength=str(selection_status.get("signal_strength") or "unknown"),
+        selection_notes_html=_render_note_list(
+            selection_status.get("notes"),
+            empty="No blockers or caveats are recorded for the current selection.",
+        ),
+        selection_next_step=_shorten((selection_status.get("next_steps") or ["(none)"])[0], 120),
+        replay_status=str(replay_status.get("status") or "blocked"),
+        replay_status_class=status_pill_class(str(replay_status.get("status") or "blocked")),
+        replay_summary=_shorten(replay_status.get("summary") or "Run analyze to evaluate replay readiness.", 120),
+        replay_decode_level=str(replay_status.get("decode_level") or "heuristic"),
+        replay_replay_level=str(replay_status.get("replay_level") or "unsupported"),
+        replay_unit_type=str(replay_status.get("dominant_unit_type") or "opaque_chunk"),
+        replay_confidence_band=str(replay_confidence.get("confidence_band") or "low"),
+        replay_confidence_label=str(replay_confidence.get("confidence_label") or "unknown"),
+        replay_confidence_score=str(replay_confidence.get("confidence_score") or "?"),
+        replay_delivery_mode=str(replay_confidence.get("delivery_mode") or "unknown"),
+        replay_reasons_html=_render_note_list(
+            replay_status.get("reasons"),
+            empty="No replay blockers or caveats are recorded yet.",
+        ),
+        replay_next_steps_html=_render_note_list(
+            replay_status.get("next_steps"),
+            empty="No replay next step is recorded yet.",
+        ),
+        wpa_status=str(wpa_status.get("status") or "ready"),
+        wpa_status_class=status_pill_class(str(wpa_status.get("status") or "ready")),
+        wpa_summary=_shorten(wpa_status.get("summary") or "WPA feasibility is not relevant to the current workflow.", 120),
+        wpa_state=str(wpa_status.get("state") or "not_applicable"),
+        wpa_artifact=str(wpa_status.get("handshake_artifact") or "(none)"),
+        wpa_reasons_html=_render_note_list(
+            wpa_status.get("reasons"),
+            empty="No WPA blockers or caveats are recorded yet.",
+        ),
+        wpa_next_steps_html=_render_note_list(
+            wpa_status.get("next_steps"),
+            empty="No WPA next step is recorded yet.",
+        ),
+        workflow_cards_html=workflow_cards_html,
     )
 
 
@@ -226,6 +323,25 @@ def _dashboard_template(**values: object) -> str:
       align-items: center;
       margin-top: 10px;
     }}
+    .status-stack {{
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }}
+    .status-card {{
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(8, 12, 17, 0.52);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .status-card header {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -242,6 +358,12 @@ def _dashboard_template(**values: object) -> str:
     .pill.warning {{ color: var(--warn); border-color: rgba(243,201,105,0.45); }}
     .pill.error, .pill.missing {{ color: var(--bad); border-color: rgba(255,143,125,0.45); }}
     .muted {{ color: var(--muted); }}
+    .note-list {{
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 6px;
+    }}
     .artifact-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -365,6 +487,12 @@ def _dashboard_template(**values: object) -> str:
 
     <section class="grid">
       <div class="panel wide">
+        <h2>What This Machine Can Do</h2>
+        <p class="muted">{val('machine_summary_headline')}</p>
+        <div class="status-stack">{values.get('machine_cards_html', '')}</div>
+      </div>
+
+      <div class="panel wide">
         <h2>Pipeline Actions</h2>
         <p class="muted">Use the quick actions for the usual flow, or fill in a pcap / decrypted-reference path for one-off runs. While an action is running, this page refreshes every few seconds.</p>
         <form method="post" action="/action">
@@ -432,6 +560,35 @@ def _dashboard_template(**values: object) -> str:
         <p><strong>Analysis stream:</strong> {val('analysis_stream')}</p>
         <p class="muted">Top hypothesis: {val('top_hypothesis')}</p>
         <p class="muted">Corpus best match: {val('best_match_id')} {val('best_match_similarity')}</p>
+        <div class="status-row">
+          <span class="pill {val('selection_status_class')}">{val('selection_status')}</span>
+          <span class="muted">{val('selection_summary')}</span>
+        </div>
+        <p class="muted">Decode / replay: {val('selection_decode_level')} / {val('selection_replay_level')} ({val('selection_unit_type')})</p>
+        <p class="muted">Signal strength: {val('selection_signal_strength')}</p>
+        {values.get('selection_notes_html', '')}
+        <p class="muted">Next step: {val('selection_next_step')}</p>
+      </div>
+
+      <div class="panel">
+        <h2>Replay + WPA Readiness</h2>
+        <div class="status-row">
+          <span class="pill {val('replay_status_class')}">{val('replay_status')}</span>
+          <strong>Replay path</strong>
+        </div>
+        <p class="muted">{val('replay_summary')}</p>
+        <p class="muted">Decode / replay: {val('replay_decode_level')} / {val('replay_replay_level')} ({val('replay_unit_type')})</p>
+        <p class="muted">Confidence: {val('replay_confidence_band')} [{val('replay_confidence_label')}, score={val('replay_confidence_score')}] via {val('replay_delivery_mode')}</p>
+        {values.get('replay_reasons_html', '')}
+        {values.get('replay_next_steps_html', '')}
+        <div class="status-row" style="margin-top:16px">
+          <span class="pill {val('wpa_status_class')}">{val('wpa_status')}</span>
+          <strong>WPA path</strong>
+        </div>
+        <p class="muted">{val('wpa_summary')}</p>
+        <p class="muted">State / artifact: {val('wpa_state')} / {val('wpa_artifact')}</p>
+        {values.get('wpa_reasons_html', '')}
+        {values.get('wpa_next_steps_html', '')}
       </div>
 
       <div class="panel wide">
@@ -521,6 +678,11 @@ def _dashboard_template(**values: object) -> str:
           </div>
           <button type="submit">Save Configuration</button>
         </form>
+      </div>
+
+      <div class="panel wide">
+        <h2>Workflow Capabilities</h2>
+        <div class="status-stack">{values.get('workflow_cards_html', '')}</div>
       </div>
 
       <div class="panel wide">

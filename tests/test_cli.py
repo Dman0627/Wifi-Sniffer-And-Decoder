@@ -308,11 +308,98 @@ def test_run_preflight_returns_false_when_blocked(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
         "print_pipeline_feasibility",
-        lambda config, report: {"status": "blocked", "replay": {"status": "blocked"}},
+        lambda config, report: {"status": "blocked", "replay": {"status": "blocked"}, "capabilities": {}},
     )
     monkeypatch.setattr(cli, "_load_report", lambda config: None)
 
     assert cli.run_preflight({"output_dir": "."}) is False
+
+
+def test_show_report_summary_uses_shared_status_language(monkeypatch, capsys) -> None:
+    detection = {
+        "selected_candidate_stream": {
+            "stream_id": "stream-1",
+            "candidate_class": "png",
+            "score": 88,
+        },
+        "selected_protocol_support": {
+            "decode_level": "high_confidence",
+            "replay_level": "heuristic",
+        },
+        "protocol_hits": {"opaque": 0},
+    }
+    analysis = {
+        "selected_candidate_stream": {"stream_id": "stream-1"},
+        "ciphertext_observations": {"chi_squared": 1.23},
+        "total_units": 12,
+        "hypotheses": [{"name": "PNG"}],
+        "recommendations": ["Capture more payload."],
+    }
+
+    monkeypatch.setattr(
+        cli,
+        "_load_json",
+        lambda path: detection if path.name == "detection_report.json" else analysis if path.name == "analysis_report.json" else None,
+    )
+    monkeypatch.setattr(
+        cli,
+        "build_surface_status_bundle",
+        lambda config, current_detection, current_analysis: {
+            "machine_summary": {
+                "headline": "Windows controller + Linux appliance / privilege=user",
+                "items": [
+                    {
+                        "label": "Local capture",
+                        "status": "limited",
+                        "summary": "This machine can capture a pcap locally, but monitor work is still limited.",
+                        "reason": "Windows capture depends on Npcap.",
+                        "next_step": "Prefer the Linux appliance path for full Wi-Fi lab work.",
+                    }
+                ],
+            },
+            "replay": {
+                "status": "limited",
+                "summary": "Replay can proceed, but there are caveats you should see first.",
+                "warnings": ["Thin capture sample."],
+                "blockers": [],
+                "next_steps": ["Capture more payload before replaying."],
+                "confidence": {
+                    "confidence_band": "limited",
+                    "confidence_label": "heuristic",
+                    "confidence_score": 0.58,
+                },
+            },
+            "wpa": {
+                "status": "blocked",
+                "summary": "A usable WPA artifact is still missing.",
+                "reasons": ["No handshake or PMKID capture is available."],
+                "next_steps": ["Capture a handshake before retrying WPA decrypt."],
+            },
+        },
+    )
+
+    cli._show_report_summary({"output_dir": "."})
+    output = capsys.readouterr().out
+
+    assert "Replay Path" in output
+    assert "Replay Summary" in output
+    assert "Top Caveat" in output
+    assert "Capture more payload before replaying." in output
+    assert "WPA Path" in output
+    assert "A usable WPA artifact is still missing." in output
+    assert "What This Machine Can Do" in output
+    assert "Windows controller + Linux appliance / privilege=user" in output
+    assert "Prefer the Linux appliance path for full Wi-Fi lab work." in output
+
+
+def test_run_hardware_uses_capability_report(monkeypatch) -> None:
+    seen = {}
+
+    monkeypatch.setattr(cli, "build_capability_report", lambda config: {"config": dict(config)})
+    monkeypatch.setattr(cli, "print_capability_hardware", lambda report: seen.setdefault("report", report))
+
+    assert cli.run_hardware({"interface": "wlan0"}) is True
+    assert seen["report"] == {"config": {"interface": "wlan0"}}
 
 
 def test_run_analyze_attaches_feasibility(monkeypatch) -> None:
@@ -539,6 +626,9 @@ def test_run_validate_remote_writes_report(monkeypatch, tmp_path) -> None:
     assert data["overall_ok"] is True
     assert data["smoke_capture"]["success"] is True
     assert data["smoke_capture"]["size_bytes"] == 4
+    assert data["capability_report"]["platform"]["product_profile_label"]
+    assert data["status_bundle"]["machine_summary"]["items"]
+    assert data["status_bundle"]["workflow"]
 
 
 def test_run_validate_remote_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> None:
@@ -566,6 +656,9 @@ def test_run_validate_remote_skip_smoke_can_still_pass(monkeypatch, tmp_path) ->
     )
 
     assert result is True
+    data = __import__("json").loads(report_path.read_text(encoding="utf-8"))
+    assert data["capability_report"]["capture_methods"]
+    assert data["status_bundle"]["replay"]["status"]
 
 
 def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
@@ -578,7 +671,19 @@ def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "run_capture", lambda config, strip_wifi=False: str(capture_path))
     monkeypatch.setattr(cli, "run_extract", lambda config, pcap: {"streams": 1})
     monkeypatch.setattr(cli, "run_detect", lambda config, manifest_path=None: {"selected_candidate_stream": {"stream_id": "s1"}})
-    monkeypatch.setattr(cli, "run_analyze", lambda config, decrypted_dir=None: {"candidate_material": {"mode": "static_xor_candidate"}})
+    monkeypatch.setattr(
+        cli,
+        "run_analyze",
+        lambda config, decrypted_dir=None: {
+            "candidate_material": {"mode": "static_xor_candidate"},
+            "selected_protocol_support": {"replay_level": "guaranteed", "dominant_unit_type": "plain_text"},
+            "selected_replay_confidence": {
+                "handler_id": "txt",
+                "confidence_label": "guaranteed",
+                "supported": True,
+            },
+        },
+    )
 
     result = cli.run_validate_local(
         {"output_dir": str(tmp_path), "interface": "wlan0", "capture_duration": 20},
@@ -593,6 +698,9 @@ def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
     assert data["smoke_capture"]["success"] is True
     assert data["processing_smoke"]["success"] is True
     assert data["interface_check"]["present"] is True
+    assert data["processing_smoke"]["selected_replay_confidence"]["handler_id"] == "txt"
+    assert data["capability_report"]["platform"]["product_profile_label"]
+    assert data["status_bundle"]["machine_summary"]["items"]
 
 
 def test_run_validate_local_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> None:
@@ -611,4 +719,6 @@ def test_run_validate_local_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> 
     assert result is True
     data = __import__("json").loads(report_path.read_text(encoding="utf-8"))
     assert data["overall_ok"] is True
+    assert data["capability_report"]["capture_methods"]
+    assert data["status_bundle"]["wpa"]["status"]
     assert data["smoke_capture"]["requested"] is False
