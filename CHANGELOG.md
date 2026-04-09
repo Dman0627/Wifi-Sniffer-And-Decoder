@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+This branch adds a second product layer on top of the original Wi-Fi workflow: a plugin-driven passive intelligence platform.
+
+Highlights:
+
+- added `intel_core`, canonical records, plugin contracts, and registry support
+- added `intelpipeline` with `ingest -> extract -> recover -> normalize -> correlate -> store -> present`
+- added SQLite-backed storage, local API routes, HTML dashboard views, and dataset export/report surfaces
+- added a passive monitor runtime with watched-source registration, adaptive scheduling, queue orchestration, cleanup, forecasting, tuning, and operator controls
+- added passive remote connector intake for approved HTTP feeds and RDAP domain lookups
+- added plugin profiles and enable/disable controls for builtin platform plugins
+- added passive enrichment and compatibility wiring so the legacy Wi-Fi workflow still works alongside the new platform
+- added broad unit and integration coverage for the platform, monitor runtime, connector collectors, dashboard, CLI, storage, and packaging
+
 ## 3.0.0
 
 This release reshapes the project around a narrow, explicit support matrix:
