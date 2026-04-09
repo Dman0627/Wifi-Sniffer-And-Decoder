@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from intel_core import (
     ArtifactRecord,
@@ -15,20 +16,25 @@ from intel_core import (
 from intel_storage import SQLiteIntelligenceStore
 
 
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
 def test_sqlite_store_persists_sources_records_relationships_and_timelines(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
 
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-1",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
         display_name="sample.txt",
     )
     records = [
-        ArtifactRecord(id="artifact-1", source_id="source-1", case_id="case-1", artifact_type="file", path="C:/evidence/sample.txt"),
+        ArtifactRecord(id="artifact-1", source_id="source-1", case_id="case-1", artifact_type="file", path=sample_path),
         IndicatorRecord(
             id="indicator-1",
             source_id="source-1",
@@ -93,12 +99,13 @@ def test_sqlite_store_persists_sources_records_relationships_and_timelines(tmp_p
 def test_sqlite_store_upserts_without_duplicate_rows(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-1",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
     )
     record = IndicatorRecord(
         id="indicator-1",
@@ -121,15 +128,16 @@ def test_sqlite_store_upserts_without_duplicate_rows(tmp_path) -> None:
 def test_sqlite_store_query_helpers_return_case_summary_and_graph(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-graph",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
     )
     records = [
-        ArtifactRecord(id="artifact-1", source_id="source-1", case_id="case-graph", artifact_type="file", path="C:/evidence/sample.txt"),
+        ArtifactRecord(id="artifact-1", source_id="source-1", case_id="case-graph", artifact_type="file", path=sample_path),
         IndicatorRecord(
             id="indicator-1",
             source_id="source-1",
@@ -183,12 +191,14 @@ def test_sqlite_store_query_helpers_return_case_summary_and_graph(tmp_path) -> N
 def test_sqlite_store_search_jobs_audit_and_neighbors_queries(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
+    report_path = _fake_path("tmp", "extract_report.json")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-query",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
     )
     records = [
         IndicatorRecord(
@@ -259,7 +269,7 @@ def test_sqlite_store_search_jobs_audit_and_neighbors_queries(tmp_path) -> None:
                 "metrics": {"record_count": 5},
                 "warnings": [],
                 "errors": [],
-                "artifact_paths": ["D:/tmp/extract_report.json"],
+                "artifact_paths": [report_path],
             },
         )
     )
@@ -282,12 +292,14 @@ def test_sqlite_store_search_jobs_audit_and_neighbors_queries(tmp_path) -> None:
 def test_sqlite_store_persists_job_rows_and_audit_events(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
+    report_path = _fake_path("tmp", "extract_report.json")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-audit",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
     )
 
     store.persist(
@@ -319,7 +331,7 @@ def test_sqlite_store_persists_job_rows_and_audit_events(tmp_path) -> None:
                 "metrics": {"record_count": 3},
                 "warnings": [],
                 "errors": [],
-                "artifact_paths": ["D:/tmp/extract_report.json"],
+                "artifact_paths": [report_path],
             },
         )
     )
@@ -379,6 +391,7 @@ def test_sqlite_store_persists_and_queries_watched_sources(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
     store.initialize()
+    sample_path = _fake_path("evidence", "sample.txt")
 
     store.persist_watched_sources(
         (
@@ -386,7 +399,7 @@ def test_sqlite_store_persists_and_queries_watched_sources(tmp_path) -> None:
                 "watch_id": "watch-src-1",
                 "case_id": "case-watch-registry",
                 "source_type": "file",
-                "locator": "C:/evidence/sample.txt",
+                "locator": sample_path,
                 "display_name": "sample.txt",
                 "recursive": False,
                 "enabled": True,

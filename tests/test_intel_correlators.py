@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from intel_core import (
     ArtifactRecord,
     Confidence,
@@ -12,10 +14,14 @@ from intel_core import (
 from intel_correlators import GraphCorrelatorPlugin
 
 
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
 def test_graph_correlator_links_identities_domains_urls_and_artifacts() -> None:
     plugin = GraphCorrelatorPlugin()
     records = [
-        ArtifactRecord(id="artifact-1", source_id="source-1", artifact_type="file", path="C:/evidence/sample.txt"),
+        ArtifactRecord(id="artifact-1", source_id="source-1", artifact_type="file", path=_fake_path("evidence", "sample.txt")),
         IndicatorRecord(
             id="indicator-email",
             source_id="source-1",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from intel_collectors import (
@@ -14,6 +16,17 @@ from intel_collectors import (
     SystemArtifactCollectorPlugin,
 )
 from intel_core import IngestRequest, PluginExecutionContext
+
+
+def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"server on {host}:{port} did not become ready")
 
 
 def _start_http_fixture_server(fixtures: dict[str, dict[str, object]]) -> tuple[ThreadingHTTPServer, threading.Thread, str]:
@@ -41,6 +54,7 @@ def _start_http_fixture_server(fixtures: dict[str, dict[str, object]]) -> tuple[
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address
+    _wait_for_server(host, port)
     return server, thread, f"http://{host}:{port}"
 
 

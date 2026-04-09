@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request
@@ -10,6 +12,21 @@ from urllib.request import urlopen
 from intel_api import create_api_server
 from intel_core import EventRecord, IndicatorRecord, JobRecord, RelationshipRecord, SourceRecord, TimelineRecord
 from intel_storage import SQLiteIntelligenceStore
+
+
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
+def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"server on {host}:{port} did not become ready")
 
 
 def _read_json(url: str) -> dict[str, object]:
@@ -33,13 +50,16 @@ def _post_form(url: str, payload: dict[str, object]) -> dict[str, object]:
 
 
 def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, *, case_id: str) -> None:
+    hot_path = _fake_path("evidence", "hot.log")
+    cool_path = _fake_path("evidence", "cool.txt")
+    other_path = _fake_path("evidence", "other.bin")
     store.persist_watched_sources(
         (
             {
                 "watch_id": "watch-hot",
                 "case_id": case_id,
                 "source_type": "log",
-                "locator": "C:/evidence/hot.log",
+                "locator": hot_path,
                 "display_name": "hot.log",
                 "recursive": False,
                 "enabled": True,
@@ -55,7 +75,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "watch_id": "watch-cool",
                 "case_id": case_id,
                 "source_type": "file",
-                "locator": "C:/evidence/cool.txt",
+                "locator": cool_path,
                 "display_name": "cool.txt",
                 "recursive": False,
                 "enabled": True,
@@ -77,7 +97,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "case_id": case_id,
                 "watcher_type": "source_monitor",
                 "source_type": "log",
-                "locator": "C:/evidence/hot.log",
+                "locator": hot_path,
                 "status": "changed",
                 "last_checked_at": "2026-04-08T12:10:00Z",
                 "last_seen_at": "2026-04-08T12:10:00Z",
@@ -102,7 +122,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "case_id": case_id,
                 "watcher_type": "source_monitor",
                 "source_type": "file",
-                "locator": "C:/evidence/cool.txt",
+                "locator": cool_path,
                 "status": "changed",
                 "last_checked_at": "2026-04-08T12:10:00Z",
                 "last_seen_at": "2026-04-08T12:10:00Z",
@@ -150,7 +170,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "source_id": "source-1",
                 "case_id": case_id,
                 "source_type": "log",
-                "locator": "C:/evidence/hot.log",
+                "locator": hot_path,
                 "display_name": "hot.log",
             },
         },
@@ -176,7 +196,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "source_id": "source-1",
                 "case_id": case_id,
                 "source_type": "file",
-                "locator": "C:/evidence/cool.txt",
+                "locator": cool_path,
                 "display_name": "cool.txt",
             },
         },
@@ -201,7 +221,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 "source_id": "source-other",
                 "case_id": "case-other",
                 "source_type": "file",
-                "locator": "C:/evidence/other.bin",
+                "locator": other_path,
                 "display_name": "other.bin",
             },
         },
@@ -426,7 +446,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
             "results": [
                 {
                     "watch_id": "watch-hot",
-                    "locator": "C:/evidence/hot.log",
+                    "locator": hot_path,
                     "source_type": "log",
                     "ok": True,
                     "executed": True,
@@ -447,7 +467,7 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
                 },
                 {
                     "watch_id": "watch-cool",
-                    "locator": "C:/evidence/cool.txt",
+                    "locator": cool_path,
                     "source_type": "file",
                     "ok": True,
                     "executed": False,
@@ -515,12 +535,14 @@ def _seed_monitor_snapshot(database_path: Path, store: SQLiteIntelligenceStore, 
 def test_api_server_exposes_case_summary_and_relationship_endpoints(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    sample_path = _fake_path("evidence", "sample.txt")
+    report_path = _fake_path("tmp", "extract_report.json")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-api",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=sample_path,
     )
     store.persist(
         source=source,
@@ -585,7 +607,7 @@ def test_api_server_exposes_case_summary_and_relationship_endpoints(tmp_path) ->
                 "metrics": {"record_count": 4},
                 "warnings": [],
                 "errors": [],
-                "artifact_paths": ["D:/tmp/extract_report.json"],
+                "artifact_paths": [report_path],
             },
         )
     )
@@ -596,6 +618,7 @@ def test_api_server_exposes_case_summary_and_relationship_endpoints(tmp_path) ->
     thread.start()
     try:
         host, port = server.server_address
+        _wait_for_server(host, port)
         base_url = f"http://{host}:{port}"
         health = _read_json(f"{base_url}/health")
         monitor = _read_json(f"{base_url}/monitor")
@@ -803,7 +826,7 @@ def test_api_server_plugin_controls_persist_profiles(tmp_path) -> None:
         source_id="source-1",
         case_id="case-plugin-api",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=_fake_path("evidence", "sample.txt"),
         display_name="sample.txt",
     )
     store.persist(source=source, records=())
@@ -813,6 +836,7 @@ def test_api_server_plugin_controls_persist_profiles(tmp_path) -> None:
     thread.start()
     try:
         host, port = server.server_address
+        _wait_for_server(host, port)
         base_url = f"http://{host}:{port}"
 
         initial_plugins = _read_json(f"{base_url}/plugins")
@@ -866,12 +890,13 @@ def test_api_server_plugin_controls_persist_profiles(tmp_path) -> None:
 def test_api_server_exposes_html_dashboard_views(tmp_path) -> None:
     database_path = tmp_path / "intel.sqlite3"
     store = SQLiteIntelligenceStore(database_path)
+    report_path = _fake_path("tmp", "extract_report.json")
     source = SourceRecord(
         id="source-1",
         source_id="source-1",
         case_id="case-ui",
         source_type="file",
-        locator="C:/evidence/sample.txt",
+        locator=_fake_path("evidence", "sample.txt"),
         display_name="sample.txt",
     )
     store.persist(
@@ -938,7 +963,7 @@ def test_api_server_exposes_html_dashboard_views(tmp_path) -> None:
                 "metrics": {"record_count": 4},
                 "warnings": [],
                 "errors": [],
-                "artifact_paths": ["D:/tmp/extract_report.json"],
+                "artifact_paths": [report_path],
             },
         )
     )
@@ -949,6 +974,7 @@ def test_api_server_exposes_html_dashboard_views(tmp_path) -> None:
     thread.start()
     try:
         host, port = server.server_address
+        _wait_for_server(host, port)
         base_url = f"http://{host}:{port}"
 
         content_type, home = _read_text(f"{base_url}/")

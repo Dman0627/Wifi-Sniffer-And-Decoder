@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import socket
 import threading
 import time
 from http.server import ThreadingHTTPServer
@@ -11,6 +12,17 @@ from urllib.parse import urlencode
 from wifi_pipeline.config import load_config, save_config
 from wifi_pipeline.webapp import ActionLog, DashboardHandler, DashboardState
 from wifi_pipeline.webapp_render import render_dashboard_html
+
+
+def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"server on {host}:{port} did not become ready")
 
 
 def test_dashboard_update_config_persists_form_values(tmp_path) -> None:
@@ -306,6 +318,7 @@ def test_dashboard_http_routes_smoke(monkeypatch, tmp_path) -> None:
     thread.start()
 
     try:
+        _wait_for_server("127.0.0.1", server.server_address[1])
         conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
 
         conn.request("GET", "/")

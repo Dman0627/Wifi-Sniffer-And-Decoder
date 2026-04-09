@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,6 +11,17 @@ from pathlib import Path
 from intel_api import PlatformApp
 from intel_api.cli import main
 from intel_core import IngestRequest
+
+
+def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"server on {host}:{port} did not become ready")
 
 
 def _set_age_days(path: Path, *, days: float) -> None:
@@ -42,6 +54,7 @@ def _start_http_fixture_server(fixtures: dict[str, dict[str, object]]) -> tuple[
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address
+    _wait_for_server(host, port)
     return server, thread, f"http://{host}:{port}"
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from intel_api.dashboard_render import (
     render_case_dashboard_html,
     render_case_index_html,
@@ -11,6 +13,10 @@ from intel_core import EventRecord, IndicatorRecord, RelationshipRecord, SourceR
 from intel_storage import SQLiteIntelligenceStore
 
 
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
 def _seed_store(database_path, *, case_id: str = "case-render") -> SQLiteIntelligenceStore:
     store = SQLiteIntelligenceStore(database_path)
     source = SourceRecord(
@@ -18,7 +24,7 @@ def _seed_store(database_path, *, case_id: str = "case-render") -> SQLiteIntelli
         source_id="source-1",
         case_id=case_id,
         source_type="file",
-        locator="C:/evidence/render.txt",
+        locator=_fake_path("evidence", "render.txt"),
         display_name="render.txt",
     )
     store.persist(
@@ -86,7 +92,7 @@ def _sample_monitor_view(*, case_id: str = "case-render") -> dict[str, object]:
             "summary": {
                 "removed_count": 3,
                 "removed_bytes": 256,
-                "report_path": "C:/reports/cleanup_report.json",
+                "report_path": _fake_path("reports", "cleanup_report.json"),
             },
         },
         "trends": {

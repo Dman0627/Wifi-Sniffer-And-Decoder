@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -14,6 +15,21 @@ from intel_core.registry import PluginRegistry
 from intel_plugins import build_builtin_registry
 from intel_plugins.wifi import WifiPipelinePlugin
 from intel_storage import SQLiteIntelligenceStore
+
+
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
+def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.2):
+                return
+        except OSError:
+            time.sleep(0.05)
+    raise AssertionError(f"server on {host}:{port} did not become ready")
 
 
 def _set_age_days(path: Path, *, days: float) -> None:
@@ -46,6 +62,7 @@ def _start_http_fixture_server(fixtures: dict[str, dict[str, object]]) -> tuple[
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address
+    _wait_for_server(host, port)
     return server, thread, f"http://{host}:{port}"
 
 
@@ -101,7 +118,7 @@ def test_platform_app_plugin_statuses_surface_optional_tool_availability(monkeyp
     def fake_which(name: str) -> str | None:
         if name in {"exiftool", "yara"}:
             return None
-        return f"C:/tools/{name}.exe"
+        return _fake_path("tools", f"{name}.exe")
 
     monkeypatch.setattr("intel_api.app.shutil.which", fake_which)
     monkeypatch.setattr("intel_extractors.external.shutil.which", fake_which)

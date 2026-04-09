@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from intel_core import (
     ArtifactRecord,
     CollectorPlugin,
@@ -17,12 +19,17 @@ from intel_core import (
 from intel_core.records import IdentityRecord, canonical_fingerprint, new_record_id
 
 
+def _fake_path(*parts: str) -> str:
+    return str((Path.cwd() / "_ci_fixtures" / Path(*parts)).resolve())
+
+
 def test_record_round_trip_preserves_nested_schema_fields() -> None:
+    report_path = _fake_path("tmp", "report.pdf")
     record = ArtifactRecord(
         id=new_record_id("artifact"),
         source_id="source-1",
         artifact_type="file",
-        path="C:/tmp/report.pdf",
+        path=report_path,
         media_type="application/pdf",
         sha256="abc123",
         size_bytes=128,
@@ -43,7 +50,7 @@ def test_record_round_trip_preserves_nested_schema_fields() -> None:
 
     assert isinstance(restored, ArtifactRecord)
     assert restored.record_type == "artifact"
-    assert restored.path == "C:/tmp/report.pdf"
+    assert restored.path == report_path
     assert restored.tags == ("document", "pdf")
     assert restored.provenance.plugin == "file-metadata"
     assert restored.confidence.label == "high"
