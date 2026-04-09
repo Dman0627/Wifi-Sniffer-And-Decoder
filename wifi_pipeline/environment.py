@@ -1726,7 +1726,7 @@ def command_support(
 ) -> CommandSupport:
     profile = resolve_product_profile(config)
 
-    analysis_commands = {"config", "deps", "hardware", "preflight", "release-gate", "crack-status", "extract", "detect", "analyze", "play", "corpus", "web", "menu"}
+    analysis_commands = {"config", "deps", "hardware", "preflight", "release-gate", "crack-status", "extract", "detect", "analyze", "enrich", "play", "corpus", "web", "menu"}
     remote_commands = {"remote", "discover-remote", "pair-remote", "bootstrap-remote", "start-remote", "remote-service", "validate-remote", "setup-remote"}
     local_validation_commands = {"validate-local"}
     local_capture_commands = {"capture"}

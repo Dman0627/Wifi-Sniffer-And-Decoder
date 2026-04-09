@@ -40,7 +40,18 @@ INCLUDE_PATHS = (
     "scripts/release_gate.py",
     "scripts/check.ps1",
     "scripts/check.sh",
+    "docs",
     "validation_matrix",
+    "intel_api",
+    "intel_collectors",
+    "intel_correlators",
+    "intel_core",
+    "intel_extractors",
+    "intel_normalizers",
+    "intel_plugins",
+    "intel_recovery",
+    "intel_runtime",
+    "intel_storage",
     "wifi_pipeline",
 )
 

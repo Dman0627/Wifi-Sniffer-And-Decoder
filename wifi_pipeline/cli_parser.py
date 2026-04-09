@@ -133,6 +133,9 @@ def build_parser() -> argparse.ArgumentParser:
     analyze_p = subparsers.add_parser("analyze", help="Run cipher heuristics")
     analyze_p.add_argument("--decrypted", required=False, help="Directory containing decrypted reference units")
 
+    enrich_p = subparsers.add_parser("enrich", help="Build artifact metadata and passive triage summaries from extracted units")
+    enrich_p.add_argument("--manifest", required=False, help="Path to an existing manifest.json")
+
     subparsers.add_parser("play", help="Start experimental replay/reconstruction using the last analysis report")
     subparsers.add_parser("corpus", help="Show archived candidate streams and reusable material")
 

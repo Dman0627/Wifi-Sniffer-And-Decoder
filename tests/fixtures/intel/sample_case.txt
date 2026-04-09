@@ -1,0 +1,5 @@
+email=test@example.com
+profile=https://example.com/profile
+portal=https://example.com/login
+domain=example.org
+note=fixture data for platform validation

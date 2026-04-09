@@ -34,8 +34,10 @@ def test_pyproject_exposes_console_script() -> None:
     data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
     assert data["project"]["name"] == "wifi-sniffer-and-decoder"
+    assert data["project"]["scripts"]["intelpipeline"] == "intel_api.cli:main"
     assert data["project"]["scripts"]["videopipeline"] == "wifi_pipeline.cli:main"
     assert data["tool"]["setuptools"]["dynamic"]["version"]["attr"] == "wifi_pipeline.__version__"
+    assert "intel_*" in data["tool"]["setuptools"]["packages"]["find"]["include"]
 
 
 def test_project_metadata_points_at_current_repository() -> None:
@@ -77,6 +79,7 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     assert "GETTING_STARTED.md" in members
     assert "RELEASE_CHECKLIST.md" in members
     assert "README.md" in members
+    assert "docs/PLATFORM_WORKFLOW.md" in members
     assert "videopipeline.py" in members
     assert "run_local.sh" in members
     assert "setup_local.sh" in members
@@ -86,6 +89,27 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     assert "scripts/build_agent_bundle.py" in members
     assert "scripts/release_gate.py" in members
     assert "validation_matrix/README.md" in members
+    assert "intel_api/app.py" in members
+    assert "intel_api/cli.py" in members
+    assert "intel_api/dashboard_render.py" in members
+    assert "intel_api/server.py" in members
+    assert "intel_collectors/connectors.py" in members
+    assert "intel_collectors/filesystem.py" in members
+    assert "intel_collectors/logs.py" in members
+    assert "intel_collectors/system.py" in members
+    assert "intel_correlators/basic.py" in members
+    assert "intel_extractors/basic.py" in members
+    assert "intel_extractors/external.py" in members
+    assert "intel_extractors/pcap.py" in members
+    assert "intel_extractors/specialized.py" in members
+    assert "intel_extractors/system_artifacts.py" in members
+    assert "intel_normalizers/basic.py" in members
+    assert "intel_plugins/wifi/plugin.py" in members
+    assert "intel_core/records.py" in members
+    assert "intel_recovery/basic.py" in members
+    assert "intel_runtime/monitor.py" in members
+    assert "intel_storage/sqlite_store.py" in members
+    assert "intel_storage/workspace.py" in members
     assert "wifi_pipeline/cli.py" in members
 
 

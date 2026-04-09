@@ -236,6 +236,15 @@ def test_build_parser_parses_preflight_arguments() -> None:
     assert args.command == "preflight"
 
 
+def test_build_parser_parses_enrich_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["enrich", "--manifest", "manifest.json"])
+
+    assert args.command == "enrich"
+    assert args.manifest == "manifest.json"
+
+
 def test_build_parser_parses_release_gate_arguments() -> None:
     parser = cli.build_parser()
 
@@ -422,6 +431,37 @@ def test_run_analyze_attaches_feasibility(monkeypatch) -> None:
     result = cli.run_analyze({"output_dir": "."}, None)
 
     assert result["feasibility"]["status"] == "blocked"
+
+
+def test_run_enrich_uses_artifact_enricher(monkeypatch) -> None:
+    report = {"units_analyzed": 3}
+
+    class DummyEnricher:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def enrich(self, manifest_path=None):
+            return report
+
+    monkeypatch.setattr(cli, "ArtifactEnricher", DummyEnricher)
+
+    result = cli.run_enrich({"output_dir": "."}, "manifest.json")
+
+    assert result == report
+
+
+def test_run_all_includes_enrich_before_replay(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(cli, "run_extract", lambda config, pcap: calls.append("extract"))
+    monkeypatch.setattr(cli, "run_detect", lambda config, manifest_path=None: calls.append("detect"))
+    monkeypatch.setattr(cli, "run_analyze", lambda config, decrypted_dir=None: calls.append("analyze") or {"candidate_material": {"mode": "x"}})
+    monkeypatch.setattr(cli, "run_enrich", lambda config, manifest_path=None: calls.append("enrich"))
+    monkeypatch.setattr(cli, "run_play", lambda config: calls.append("play"))
+
+    cli.run_all({}, "capture.pcapng", None, False)
+
+    assert calls == ["extract", "detect", "analyze", "enrich", "play"]
 
 
 def test_run_release_gate_returns_true_when_fully_validated(monkeypatch, tmp_path) -> None:

@@ -18,6 +18,7 @@ from .capture import Capture
 from .config import load_config, save_config
 from .corpus import CorpusStore
 from .environment import check_environment, list_interfaces
+from .enrich import ArtifactEnricher
 from .extract import StreamExtractor
 from .playback import infer_replay_hint, reconstruct_from_capture
 from .status_language import build_surface_status_bundle
@@ -51,6 +52,10 @@ def _detection_report_path(config: Dict[str, object]) -> Path:
 
 def _analysis_report_path(config: Dict[str, object]) -> Path:
     return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "analysis_report.json"
+
+
+def _enrichment_report_path(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "enrichment_report.json"
 
 
 def _quiet_load_json(path: Path) -> Optional[Dict[str, object]]:
@@ -102,6 +107,7 @@ def _artifact_status(config: Dict[str, object]) -> List[Dict[str, object]]:
         ("Manifest", _manifest_path(config)),
         ("Detection Report", _detection_report_path(config)),
         ("Analysis Report", _analysis_report_path(config)),
+        ("Enrichment Report", _enrichment_report_path(config)),
     ]
     return [
         {
@@ -117,6 +123,7 @@ def _report_bundle(config: Dict[str, object]) -> Dict[str, object]:
     manifest = _quiet_load_json(_manifest_path(config)) or {}
     detection = _quiet_load_json(_detection_report_path(config)) or {}
     analysis = _quiet_load_json(_analysis_report_path(config)) or {}
+    enrichment = _quiet_load_json(_enrichment_report_path(config)) or {}
     candidate_rows = _rank_candidate_streams(manifest, config) if manifest else []
     corpus = CorpusStore(config)
     status_bundle = build_surface_status_bundle(config, detection, analysis)
@@ -124,6 +131,7 @@ def _report_bundle(config: Dict[str, object]) -> Dict[str, object]:
         "manifest": manifest,
         "detection": detection,
         "analysis": analysis,
+        "enrichment": enrichment,
         "status_bundle": status_bundle,
         "candidate_rows": candidate_rows,
         "corpus_status": corpus.status(),
@@ -327,6 +335,12 @@ class DashboardState:
                 return "Analysis did not produce a report."
             return str(_analysis_report_path(config))
 
+        if action == "enrich":
+            result = ArtifactEnricher(config).enrich()
+            if not result:
+                return "Enrichment did not produce a report."
+            return str(_enrichment_report_path(config))
+
         if action == "play":
             report = _quiet_load_json(_analysis_report_path(config)) or {}
             if not report:
@@ -348,6 +362,7 @@ class DashboardState:
             StreamExtractor(config).extract(source)
             FormatDetector(config).detect()
             report = CryptoAnalyzer(config).analyze(decrypted_dir or None)
+            ArtifactEnricher(config).enrich()
             if report and report.get("candidate_material"):
                 config_for_play = dict(config)
                 config_for_play["replay_format_hint"] = infer_replay_hint(config, report)
@@ -467,6 +482,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "manifest": _manifest_path(config),
             "detection": _detection_report_path(config),
             "analysis": _analysis_report_path(config),
+            "enrichment": _enrichment_report_path(config),
             "corpus": Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "corpus" / "index.json",
         }
         target = report_map.get(name)

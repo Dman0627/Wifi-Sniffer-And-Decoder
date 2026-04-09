@@ -1,0 +1,3 @@
+2026-04-08T12:00:00Z event=boot user=test@example.com url=https://example.com/boot
+2026-04-08T12:05:00Z event=login user=test@example.com domain=example.org
+2026-04-08T12:10:00Z event=fetch url=https://example.com/profile ip=10.0.0.5

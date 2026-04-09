@@ -40,6 +40,7 @@ dev = [
 ]
 
 [project.scripts]
+intelpipeline = "intel_api.cli:main"
 videopipeline = "wifi_pipeline.cli:main"
 
 [project.urls]
@@ -52,7 +53,7 @@ Changelog = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder/blob/main/CH
 version = { attr = "wifi_pipeline.__version__" }
 
 [tool.setuptools.packages.find]
-include = ["wifi_pipeline*"]
+include = ["wifi_pipeline*", "intel_*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

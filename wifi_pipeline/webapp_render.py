@@ -527,6 +527,7 @@ def _dashboard_template(**values: object) -> str:
             <button type="submit" name="action" value="extract">Extract</button>
             <button type="submit" name="action" value="detect">Detect</button>
             <button type="submit" name="action" value="analyze">Analyze</button>
+            <button type="submit" name="action" value="enrich">Enrich</button>
             <button type="submit" name="action" value="play">Reconstruct</button>
             <button type="submit" name="action" value="all">Run Full Flow</button>
           </div>
@@ -549,6 +550,7 @@ def _dashboard_template(**values: object) -> str:
           <a href="/reports/manifest" target="_blank">Manifest JSON</a>
           <a href="/reports/detection" target="_blank">Detection JSON</a>
           <a href="/reports/analysis" target="_blank">Analysis JSON</a>
+          <a href="/reports/enrichment" target="_blank">Enrichment JSON</a>
           <a href="/reports/corpus" target="_blank">Corpus JSON</a>
         </div>
       </div>

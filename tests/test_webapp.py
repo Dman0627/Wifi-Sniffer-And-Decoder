@@ -108,9 +108,18 @@ def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> Non
             seen["decrypted_dir"] = decrypted_dir
             return {"candidate_material": ["bytes"], "selected_candidate_stream": {"stream_id": "stream-42"}}
 
+    class FakeEnricher:
+        def __init__(self, config):
+            seen["enrich_config"] = config
+
+        def enrich(self):
+            seen["enrich_called"] = True
+            return {"units_analyzed": 2}
+
     monkeypatch.setattr("wifi_pipeline.webapp.StreamExtractor", FakeExtractor)
     monkeypatch.setattr("wifi_pipeline.webapp.FormatDetector", FakeDetector)
     monkeypatch.setattr("wifi_pipeline.webapp.CryptoAnalyzer", FakeAnalyzer)
+    monkeypatch.setattr("wifi_pipeline.webapp.ArtifactEnricher", FakeEnricher)
     monkeypatch.setattr("wifi_pipeline.webapp.infer_replay_hint", lambda config, report: "png")
     monkeypatch.setattr("wifi_pipeline.webapp.reconstruct_from_capture", lambda config, report: str(tmp_path / "replay.png"))
 
@@ -125,6 +134,7 @@ def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> Non
     assert message == f"Full pipeline finished and wrote reconstructed output to {tmp_path / 'replay.png'}"
     assert seen["extract_source"] == str(pcap_path)
     assert seen["detect_called"] is True
+    assert seen["enrich_called"] is True
     assert seen["decrypted_dir"] == str(tmp_path / "decrypted")
 
 

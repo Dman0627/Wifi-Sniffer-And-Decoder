@@ -23,6 +23,7 @@ Read [`GETTING_STARTED.md`](GETTING_STARTED.md) for the copy-paste setup guide.
 - Capture live traffic or import an existing pcap/pcapng
 - Extract TCP and UDP streams and rank likely payload candidates
 - Run protocol-aware heuristic analysis and reconstruction
+- Enrich extracted artifacts with passive metadata, fingerprints, and triage summaries
 - Track artifacts and results in a local web dashboard
 - Support Windows-first remote capture through an Ubuntu or Raspberry Pi OS device
 
@@ -61,6 +62,7 @@ python videopipeline.py deps
 python videopipeline.py hardware
 python videopipeline.py preflight
 python videopipeline.py crack-status
+python videopipeline.py enrich
 python videopipeline.py web
 python videopipeline.py all
 ```
@@ -71,6 +73,7 @@ Use these commands as the capability and readiness path:
 - `hardware`: reports what this machine, adapter, and privilege mode can actually do
 - `preflight`: explains whether the selected pipeline path is supported, limited, or blocked
 - `crack-status`: explains WPA artifact and decrypt readiness instead of guessing
+- `enrich`: adds passive artifact metadata and fingerprints for extracted units
 - `doctor`: validates the remote appliance path before a remote capture run
 
 Official Windows remote-flow commands:
@@ -140,6 +143,9 @@ For the full release checklist, see [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.m
 
 - [`GETTING_STARTED.md`](GETTING_STARTED.md): setup and daily-use guide
 - [`ECOSYSTEM_MAP.md`](ECOSYSTEM_MAP.md): shortlist of external projects worth adapting, keeping external, or avoiding for this repo
+- [`docs/adr/0001-intelligence-platform-boundary.md`](docs/adr/0001-intelligence-platform-boundary.md): architecture decision record for the platform pivot and frozen package direction
+- [`docs/PLATFORM_WORKFLOW.md`](docs/PLATFORM_WORKFLOW.md): operator workflow for `intelpipeline` from intake through presentation and local API serving
+- [`INTELLIGENCE_PLATFORM_PLAN.md`](INTELLIGENCE_PLATFORM_PLAN.md): phased implementation plan for the broader evidence-intelligence platform
 - [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md): release criteria and validation expectations
 - [`validation_matrix/README.md`](validation_matrix/README.md): required real-hardware reports
 - [`CHANGELOG.md`](CHANGELOG.md): release history

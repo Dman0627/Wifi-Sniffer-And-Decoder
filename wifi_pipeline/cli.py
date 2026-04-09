@@ -25,6 +25,7 @@ from .environment import (
     print_hardware_qualification,
     resolve_product_profile,
 )
+from .enrich import ArtifactEnricher
 from .extract import StreamExtractor
 from .feasibility import (
     attach_feasibility_to_report,
@@ -65,6 +66,10 @@ def _manifest_path(config: Dict[str, object]) -> Path:
 
 def _detection_report_path(config: Dict[str, object]) -> Path:
     return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "detection_report.json"
+
+
+def _enrichment_report_path(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "enrichment_report.json"
 
 
 def _capture_path(config: Dict[str, object]) -> Path:
@@ -1406,6 +1411,10 @@ def run_analyze(config: Dict[str, object], decrypted_dir: Optional[str]) -> Opti
     return attach_feasibility_to_report(config, report, _analysis_report_path(config))
 
 
+def run_enrich(config: Dict[str, object], manifest_path: Optional[str] = None) -> Optional[Dict[str, object]]:
+    return ArtifactEnricher(config).enrich(manifest_path)
+
+
 def run_play(config: Dict[str, object]) -> Optional[str]:
     report = _load_report(config)
     if not report:
@@ -1452,6 +1461,7 @@ def run_all(
     run_extract(config, source)
     run_detect(config)
     report = run_analyze(config, decrypted_dir)
+    run_enrich(config)
     if report and report.get("candidate_material"):
         run_play(config)
 
@@ -1467,6 +1477,7 @@ def run_all_wifi(
     run_extract(config, source)
     run_detect(config)
     report = run_analyze(config, decrypted_dir)
+    run_enrich(config)
     if report and report.get("candidate_material"):
         run_play(config)
 
@@ -1891,6 +1902,10 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.command == "analyze":
         run_analyze(config, getattr(args, "decrypted", None))
+        return 0
+
+    if args.command == "enrich":
+        run_enrich(config, getattr(args, "manifest", None))
         return 0
 
     if args.command == "play":
