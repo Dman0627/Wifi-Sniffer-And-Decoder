@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import html
+import json
 import time
 from typing import Dict
 
 from .status_language import status_pill_class
+from .wifi_discovery import AUTO_TARGET_VALUE, MANUAL_TARGET_VALUE
 
 
 def _html_text(value: object) -> str:
@@ -140,6 +142,95 @@ def _render_device_cards(devices: object) -> str:
     return "".join(cards) or "<p class='muted'>No devices are available yet.</p>"
 
 
+def _wifi_target_name(target: Dict[str, object]) -> str:
+    return str(target.get("ssid") or "").strip() or "(hidden network)"
+
+
+def _wifi_target_value(target: Dict[str, object]) -> str:
+    payload = {
+        "ssid": str(target.get("ssid") or ""),
+        "bssid": str(target.get("bssid") or ""),
+        "channel": target.get("channel") or "",
+        "signal": target.get("signal") or "",
+        "signal_label": str(target.get("signal_label") or ""),
+        "security": str(target.get("security") or ""),
+        "source": str(target.get("source") or ""),
+        "connected": bool(target.get("connected")),
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _same_wifi_target(left: Dict[str, object], right: Dict[str, object]) -> bool:
+    left_bssid = str(left.get("bssid") or "").strip().lower()
+    right_bssid = str(right.get("bssid") or "").strip().lower()
+    if left_bssid and right_bssid:
+        return left_bssid == right_bssid
+    return (
+        str(left.get("ssid") or "").strip().lower(),
+        str(left.get("channel") or "").strip(),
+    ) == (
+        str(right.get("ssid") or "").strip().lower(),
+        str(right.get("channel") or "").strip(),
+    )
+
+
+def _wifi_target_label(target: Dict[str, object]) -> str:
+    pieces = [_wifi_target_name(target)]
+    channel = str(target.get("channel") or "").strip()
+    signal = str(target.get("signal_label") or target.get("signal") or "").strip()
+    bssid = str(target.get("bssid") or "").strip()
+    if channel:
+        pieces.append(f"ch {channel}")
+    if signal:
+        pieces.append(signal)
+    if bssid:
+        pieces.append(bssid)
+    return " | ".join(pieces)
+
+
+def _render_wifi_target_cards(targets: object, auto_target: Dict[str, object]) -> str:
+    cards = []
+    for target in _dict_items(targets)[:12]:
+        connected = bool(target.get("connected"))
+        recommended = _same_wifi_target(target, auto_target) if auto_target else False
+        status = "ready" if connected or recommended else "limited"
+        badges = []
+        if connected:
+            badges.append("<span class='pill ready'>connected</span>")
+        if recommended:
+            badges.append("<span class='pill ok'>auto pick</span>")
+        badges.append(f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span>")
+        detail_parts = [
+            f"BSSID: {target.get('bssid') or '(not broadcast)'}",
+            f"Channel: {target.get('channel') or '(unknown)'}",
+            f"Signal: {target.get('signal_label') or target.get('signal') or '(unknown)'}",
+            f"Security: {target.get('security') or 'unknown'}",
+            f"Source: {target.get('source') or 'scan'}",
+        ]
+        details = "".join(f"<li>{_html_text(part)}</li>" for part in detail_parts)
+        cards.append(
+            "<article class='wifi-target-card'>"
+            "<header>"
+            "<div>"
+            f"<strong>{_html_text(_wifi_target_name(target))}</strong>"
+            f"<p class='muted'>{_html_text(_shorten(target.get('bssid') or 'SSID-only discovery', 90))}</p>"
+            "</div>"
+            f"<div class='mini-badges'>{''.join(badges)}</div>"
+            "</header>"
+            f"<ul class='note-list muted'>{details}</ul>"
+            "</article>"
+        )
+    if cards:
+        return "".join(cards)
+    return (
+        "<article class='wifi-target-card empty'>"
+        "<strong>No SSIDs discovered yet</strong>"
+        "<p class='muted'>Auto mode will keep trying when the dashboard refreshes or an auto Wi-Fi action runs. "
+        "Manual ESSID/BSSID/channel overrides still work.</p>"
+        "</article>"
+    )
+
+
 def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> str:
     config = _as_dict(snapshot.get("config"))
     bundle = _as_dict(snapshot.get("bundle"))
@@ -205,6 +296,18 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
 
     tool_cards_html = _render_tool_cards(operator_inventory.get("tools"))
     device_cards_html = _render_device_cards(operator_inventory.get("devices"))
+    wifi_targets = _dict_items(bundle.get("wifi_targets"))
+    wifi_auto_target = _as_dict(bundle.get("wifi_auto_target"))
+    wifi_target_mode = str(
+        bundle.get("wifi_target_mode")
+        or config.get("wifi_target_mode")
+        or ("selected" if config.get("ap_essid") or config.get("ap_bssid") else "auto")
+    )
+    config_wifi_target = {
+        "ssid": str(config.get("ap_essid") or ""),
+        "bssid": str(config.get("ap_bssid") or ""),
+        "channel": str(config.get("ap_channel") or ""),
+    }
 
     log_blocks = []
     for entry in reversed(logs[-6:]):
@@ -240,6 +343,45 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         interface_options.append(
             f"<option value='{_html_text(name)}'>{_html_text(description or name)}</option>"
         )
+
+    auto_option_label = (
+        f"Auto (current/strongest): {_wifi_target_label(wifi_auto_target)}"
+        if wifi_auto_target
+        else "Auto (scan and choose when available)"
+    )
+    auto_attrs = ""
+    if wifi_auto_target:
+        auto_attrs = (
+            f" data-ssid='{_html_text(wifi_auto_target.get('ssid'))}'"
+            f" data-bssid='{_html_text(wifi_auto_target.get('bssid'))}'"
+            f" data-channel='{_html_text(wifi_auto_target.get('channel'))}'"
+        )
+    wifi_target_options = [
+        f"<option value='{AUTO_TARGET_VALUE}' {'selected' if wifi_target_mode == 'auto' else ''}{auto_attrs}>{_html_text(auto_option_label)}</option>",
+        f"<option value='{MANUAL_TARGET_VALUE}' {'selected' if wifi_target_mode == 'manual' else ''}>Manual / keep override fields below</option>",
+    ]
+    wifi_essid_options = []
+    wifi_bssid_options = []
+    seen_essids = set()
+    seen_bssids = set()
+    for target in wifi_targets:
+        option_value = _wifi_target_value(target)
+        selected_attr = "selected" if wifi_target_mode == "selected" and _same_wifi_target(target, config_wifi_target) else ""
+        wifi_target_options.append(
+            f"<option value='{_html_text(option_value)}' {selected_attr}"
+            f" data-ssid='{_html_text(target.get('ssid'))}'"
+            f" data-bssid='{_html_text(target.get('bssid'))}'"
+            f" data-channel='{_html_text(target.get('channel'))}'>"
+            f"{_html_text(_wifi_target_label(target))}</option>"
+        )
+        ssid = str(target.get("ssid") or "").strip()
+        bssid = str(target.get("bssid") or "").strip()
+        if ssid and ssid.lower() not in seen_essids:
+            seen_essids.add(ssid.lower())
+            wifi_essid_options.append(f"<option value='{_html_text(ssid)}'></option>")
+        if bssid and bssid.lower() not in seen_bssids:
+            seen_bssids.add(bssid.lower())
+            wifi_bssid_options.append(f"<option value='{_html_text(bssid)}'></option>")
 
     artifact_rows = []
     for item in _dict_items(artifacts):
@@ -300,6 +442,11 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         operator_headline=str(operator_inventory.get("headline") or "Tool and device inventory will populate as the dashboard gathers context."),
         tool_cards_html=tool_cards_html,
         device_cards_html=device_cards_html,
+        wifi_target_cards_html=_render_wifi_target_cards(wifi_targets, wifi_auto_target),
+        wifi_target_options="".join(wifi_target_options),
+        wifi_essid_options="".join(wifi_essid_options),
+        wifi_bssid_options="".join(wifi_bssid_options),
+        wifi_target_mode=wifi_target_mode,
         candidate_rows_html=candidate_rows_html,
         corpus_rows_html=corpus_rows_html,
         log_blocks="".join(log_blocks) or "<p class='muted'>No actions have been run from the dashboard yet.</p>",
@@ -402,6 +549,7 @@ def _dashboard_template(**values: object) -> str:
         return _html_text(values.get(key, ""))
 
     auto_refresh = str(values.get("auto_refresh", ""))
+    last_status_class = status_pill_class(str(values.get("last_status") or "idle"))
     current_action_markup = (
         f"<span class='muted'>Current action: {val('current_action')}</span>"
         if values.get("busy")
@@ -673,29 +821,516 @@ def _dashboard_template(**values: object) -> str:
     @media (max-width: 860px) {{
       .operator-layout {{ grid-template-columns: 1fr; }}
     }}
+
+    :root {{
+      --canvas: #081014;
+      --canvas-2: #101b1f;
+      --card: rgba(18, 28, 31, 0.82);
+      --card-strong: rgba(25, 38, 41, 0.94);
+      --stroke: rgba(178, 226, 209, 0.14);
+      --stroke-strong: rgba(178, 226, 209, 0.26);
+      --text: #f2f0e8;
+      --muted: #9daea6;
+      --accent: #b7f36b;
+      --accent-2: #65d5c6;
+      --amber: #f0bf55;
+      --danger: #ff7868;
+      --shadow: 0 24px 90px rgba(0, 0, 0, 0.38);
+    }}
+    html {{
+      scroll-behavior: smooth;
+    }}
+    body {{
+      min-height: 100vh;
+      font-family: "Bahnschrift", "Aptos Display", "Segoe UI Variable", sans-serif;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(183, 243, 107, 0.22), transparent 30%),
+        radial-gradient(circle at 92% 0%, rgba(101, 213, 198, 0.18), transparent 34%),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255,255,255,0.026) 1px, transparent 1px),
+        linear-gradient(155deg, #070b0e 0%, var(--canvas) 42%, #11150f 100%);
+      background-size: auto, auto, 44px 44px, 44px 44px, auto;
+      color: var(--text);
+    }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background:
+        linear-gradient(120deg, transparent 0 42%, rgba(183, 243, 107, 0.05) 42% 43%, transparent 43% 100%),
+        radial-gradient(circle at 50% 120%, rgba(240, 191, 85, 0.1), transparent 38%);
+      mix-blend-mode: screen;
+    }}
+    .shell {{
+      width: min(1480px, calc(100vw - 28px));
+      margin: 18px auto 42px;
+      position: relative;
+      z-index: 1;
+    }}
+    .hero {{
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+      gap: 22px;
+      padding: clamp(22px, 3vw, 36px);
+      overflow: hidden;
+      position: relative;
+      background:
+        linear-gradient(135deg, rgba(22, 34, 31, 0.96), rgba(9, 14, 17, 0.96)),
+        radial-gradient(circle at top right, rgba(183, 243, 107, 0.24), transparent 38%);
+      border-color: var(--stroke-strong);
+      border-radius: 28px;
+      box-shadow: var(--shadow);
+    }}
+    .hero::after {{
+      content: "";
+      position: absolute;
+      width: 280px;
+      height: 280px;
+      right: -84px;
+      top: -96px;
+      border-radius: 999px;
+      border: 1px solid rgba(183, 243, 107, 0.24);
+      background: radial-gradient(circle, rgba(183, 243, 107, 0.12), transparent 62%);
+    }}
+    .hero-main, .hero-card {{
+      position: relative;
+      z-index: 1;
+    }}
+    .eyebrow {{
+      display: inline-flex;
+      width: fit-content;
+      margin-bottom: 12px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      color: var(--accent);
+      background: rgba(183, 243, 107, 0.08);
+      border: 1px solid rgba(183, 243, 107, 0.22);
+      font-size: 12px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }}
+    h1 {{
+      max-width: 880px;
+      font-size: clamp(38px, 5vw, 72px);
+      line-height: 0.92;
+      letter-spacing: -0.055em;
+      text-transform: none;
+    }}
+    h2 {{
+      font-size: clamp(20px, 2vw, 30px);
+      letter-spacing: -0.03em;
+    }}
+    h3 {{
+      font-size: 15px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-2);
+    }}
+    .hero p {{
+      max-width: 760px;
+      margin-top: 14px;
+      color: #bac9c0;
+      font-size: clamp(15px, 1.4vw, 18px);
+      line-height: 1.55;
+    }}
+    .hero-card {{
+      display: grid;
+      align-content: start;
+      gap: 14px;
+      padding: 18px;
+      border-radius: 22px;
+      background: rgba(5, 9, 11, 0.5);
+      border: 1px solid rgba(255,255,255,0.1);
+      backdrop-filter: blur(14px);
+    }}
+    .hero-card strong {{
+      font-size: 13px;
+      color: var(--muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }}
+    .hero-metric {{
+      display: grid;
+      gap: 4px;
+      padding: 12px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.045);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .hero-metric span {{
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }}
+    .hero-metric b {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+    }}
+    .status-row {{
+      gap: 12px;
+      margin-top: 18px;
+    }}
+    .nav-rail {{
+      position: sticky;
+      top: 10px;
+      z-index: 5;
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      margin: 14px 0 18px;
+      padding: 8px;
+      border-radius: 18px;
+      background: rgba(8, 14, 16, 0.78);
+      border: 1px solid var(--stroke);
+      backdrop-filter: blur(16px);
+      box-shadow: 0 12px 36px rgba(0,0,0,0.22);
+    }}
+    .nav-rail a {{
+      flex: 0 0 auto;
+      padding: 9px 12px;
+      color: var(--text);
+      text-decoration: none;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      font-size: 13px;
+    }}
+    .nav-rail a:hover {{
+      color: var(--accent);
+      background: rgba(183, 243, 107, 0.08);
+      border-color: rgba(183, 243, 107, 0.18);
+    }}
+    .grid {{
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 0;
+    }}
+    .panel {{
+      grid-column: span 4;
+      position: relative;
+      scroll-margin-top: 86px;
+      overflow: hidden;
+      padding: clamp(16px, 2vw, 22px);
+      border-radius: 24px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.05), transparent 42%),
+        var(--card);
+      border: 1px solid var(--stroke);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.24);
+    }}
+    .panel::before {{
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2), transparent);
+      opacity: 0.55;
+    }}
+    .panel.wide {{
+      grid-column: 1 / -1;
+    }}
+    .panel.actions {{
+      grid-column: span 8;
+    }}
+    .panel.artifacts, .panel.corpus, .panel.analysis {{
+      grid-column: span 4;
+    }}
+    .panel.selection, .panel.readiness {{
+      grid-column: span 6;
+    }}
+    .panel.config-panel {{
+      background:
+        linear-gradient(120deg, rgba(240, 191, 85, 0.09), transparent 38%),
+        var(--card);
+    }}
+    .panel > h2 + .muted {{
+      margin-top: 8px;
+      line-height: 1.5;
+    }}
+    .status-stack, .log-stack {{
+      gap: 10px;
+    }}
+    .status-card, .log-card, .tool-card, .device-card, .wifi-target-card, .artifact {{
+      background: rgba(5, 9, 11, 0.48);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }}
+    .tool-card, .device-card, .wifi-target-card {{
+      transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+    }}
+    .tool-card:hover, .device-card:hover, .wifi-target-card:hover {{
+      transform: translateY(-2px);
+      border-color: rgba(183, 243, 107, 0.28);
+      background: rgba(8, 14, 16, 0.68);
+    }}
+    .operator-layout {{
+      grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.85fr);
+      gap: 18px;
+    }}
+    .tool-grid, .device-grid {{
+      max-height: none;
+      overflow: visible;
+      scrollbar-color: rgba(183, 243, 107, 0.42) rgba(255,255,255,0.04);
+    }}
+    .tool-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+      align-items: start;
+    }}
+    .device-grid {{
+      grid-template-columns: 1fr;
+      align-items: start;
+    }}
+    .tool-card, .device-card, .wifi-target-card, .status-card, .artifact {{
+      min-width: 0;
+      align-content: start;
+    }}
+    .tool-card p, .device-card p, .wifi-target-card p, .status-card p, .requirement strong, .requirement code {{
+      overflow-wrap: anywhere;
+    }}
+    .wifi-panel {{
+      grid-column: span 5;
+    }}
+    .wifi-target-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .wifi-target-card {{
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 18px;
+      background:
+        radial-gradient(circle at top left, rgba(183, 243, 107, 0.11), transparent 45%),
+        rgba(5, 9, 11, 0.48);
+    }}
+    .wifi-target-card header {{
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      justify-content: space-between;
+    }}
+    .mini-badges {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+    }}
+    .primary-choice {{
+      grid-column: 1 / -1;
+      background: linear-gradient(135deg, rgba(183, 243, 107, 0.08), rgba(101, 213, 198, 0.06));
+      border-color: rgba(183, 243, 107, 0.18);
+    }}
+    .field-hint {{
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }}
+    .pill {{
+      gap: 6px;
+      padding: 5px 10px;
+      color: #d8e1dc;
+      background: rgba(255,255,255,0.06);
+      border-color: rgba(255,255,255,0.11);
+      font-size: 11px;
+      font-weight: 700;
+    }}
+    .pill::before {{
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 99px;
+      background: currentColor;
+      box-shadow: 0 0 16px currentColor;
+    }}
+    .pill.ok, .pill.ready, .pill.supported {{
+      color: var(--accent);
+    }}
+    .pill.running, .pill.limited, .pill.heuristic {{
+      color: var(--accent-2);
+    }}
+    .pill.warning, .pill.supported_with_limits {{
+      color: var(--amber);
+    }}
+    .pill.error, .pill.missing, .pill.blocked, .pill.unsupported {{
+      color: var(--danger);
+    }}
+    .field-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(245px, 1fr));
+    }}
+    label {{
+      padding: 10px;
+      border-radius: 15px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.05);
+    }}
+    input, select, textarea {{
+      min-height: 42px;
+      background: rgba(3, 8, 10, 0.72);
+      border-color: rgba(178, 226, 209, 0.16);
+      outline: none;
+    }}
+    input:focus, select:focus, textarea:focus {{
+      border-color: rgba(183, 243, 107, 0.58);
+      box-shadow: 0 0 0 3px rgba(183, 243, 107, 0.1);
+    }}
+    .button-row {{
+      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    }}
+    button {{
+      min-height: 42px;
+      border-radius: 14px;
+      color: #07100f;
+      background: linear-gradient(135deg, var(--accent), #72decd);
+      border: 0;
+      box-shadow: 0 12px 26px rgba(101, 213, 198, 0.14);
+      transition: transform 140ms ease, filter 140ms ease, box-shadow 140ms ease;
+    }}
+    button:hover {{
+      transform: translateY(-1px);
+      filter: brightness(1.05);
+      box-shadow: 0 16px 32px rgba(101, 213, 198, 0.2);
+    }}
+    button[value="all"], button[value="start_remote"], button[value="remote_doctor"], button[type="submit"]:last-child {{
+      background: linear-gradient(135deg, #ffe38e, var(--accent));
+    }}
+    details {{
+      padding: 12px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    summary {{
+      cursor: pointer;
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }}
+    .config-panel form {{
+      margin-top: 14px;
+    }}
+    .config-panel .field-grid {{
+      max-height: none;
+      overflow: visible;
+      padding-right: 6px;
+      scrollbar-color: rgba(183, 243, 107, 0.42) rgba(255,255,255,0.04);
+    }}
+    table {{
+      min-width: 680px;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+    }}
+    th {{
+      color: var(--accent-2);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: rgba(255,255,255,0.04);
+    }}
+    td, th {{
+      padding: 12px 10px;
+    }}
+    .panel:has(table) {{
+      overflow-x: auto;
+    }}
+    code, pre {{
+      font-family: "Cascadia Code", "IBM Plex Mono", "Consolas", monospace;
+    }}
+    code {{
+      color: #bed3cc;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }}
+    pre {{
+      background: #040708;
+      border: 1px solid rgba(255,255,255,0.06);
+    }}
+    .links a {{
+      display: inline-flex;
+      padding: 8px 10px;
+      border-radius: 999px;
+      color: var(--accent-2);
+      background: rgba(101, 213, 198, 0.08);
+      border: 1px solid rgba(101, 213, 198, 0.14);
+    }}
+    @media (max-width: 1100px) {{
+      .hero {{
+        grid-template-columns: 1fr;
+      }}
+      .panel, .panel.actions, .panel.artifacts, .panel.selection, .panel.readiness, .panel.corpus, .panel.analysis {{
+        grid-column: 1 / -1;
+      }}
+    }}
+    @media (max-width: 720px) {{
+      .shell {{
+        width: min(100% - 18px, 1480px);
+        margin-top: 9px;
+      }}
+      .hero {{
+        border-radius: 22px;
+      }}
+      .nav-rail {{
+        top: 6px;
+      }}
+      .field-grid, .button-row {{
+        grid-template-columns: 1fr;
+      }}
+    }}
   </style>
 </head>
 <body>
   <main class="shell">
     <section class="hero">
-      <h1>WiFi Stream Dashboard</h1>
-      <p>Local browser control for capture, extraction, detection, analysis, corpus matching, and offline reconstruction. This dashboard stays on your machine and wraps the existing pipeline instead of replacing it.</p>
-      <div class="status-row">
-        <span class="pill {val('last_status')}">{val('last_status')}</span>
-        <strong>{val('last_message')}</strong>
-        {current_action_markup}
-        <span class="muted">Config: {val('config_path')}</span>
+      <div class="hero-main">
+        <span class="eyebrow">Local operator console</span>
+        <h1>WiFi Stream Dashboard</h1>
+        <p>Capture on the machine or Raspberry Pi, pull artifacts back, inspect decoded streams, and keep replay/WPA readiness visible before you spend time on a long run.</p>
+        <div class="status-row">
+          <span class="pill {last_status_class}">{val('last_status')}</span>
+          <strong>{val('last_message')}</strong>
+          {current_action_markup}
+        </div>
       </div>
+      <aside class="hero-card">
+        <strong>Live context</strong>
+        <div class="hero-metric">
+          <span>Config</span>
+          <b>{val('config_path')}</b>
+        </div>
+        <div class="hero-metric">
+          <span>Capture</span>
+          <b>{val('capture_path')}</b>
+        </div>
+        <div class="hero-metric">
+          <span>Remote</span>
+          <b>{val('remote_host')}</b>
+        </div>
+      </aside>
     </section>
 
+    <nav class="nav-rail" aria-label="Dashboard sections">
+      <a href="#operator">Operator</a>
+      <a href="#wifi">Wi-Fi</a>
+      <a href="#actions">Actions</a>
+      <a href="#selection">Selection</a>
+      <a href="#artifacts">Artifacts</a>
+      <a href="#config">Config</a>
+      <a href="#logs">Logs</a>
+    </nav>
+
     <section class="grid">
-      <div class="panel wide">
+      <div class="panel wide" id="machine">
         <h2>What This Machine Can Do</h2>
         <p class="muted">{val('machine_summary_headline')}</p>
         <div class="status-stack">{values.get('machine_cards_html', '')}</div>
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide" id="operator">
         <h2>Operator Console</h2>
         <p class="muted">{val('operator_headline')}</p>
         <div class="operator-layout">
@@ -710,7 +1345,7 @@ def _dashboard_template(**values: object) -> str:
         </div>
       </div>
 
-      <div class="panel wide">
+      <div class="panel actions" id="actions">
         <h2>Pipeline Actions</h2>
         <p class="muted">Use the quick actions for the usual flow, or fill in a pcap / decrypted-reference path for one-off runs. While an action is running, this page refreshes every few seconds.</p>
         <form method="post" action="/action">
@@ -749,8 +1384,8 @@ def _dashboard_template(**values: object) -> str:
             <button type="submit" name="action" value="play">Reconstruct</button>
             <button type="submit" name="action" value="all">Run Full Flow</button>
           </div>
-          <details style="margin-top:12px">
-            <summary style="cursor:pointer;color:var(--accent-2)">Wi-Fi Lab Pipeline</summary>
+          <details>
+            <summary>Wi-Fi Lab Pipeline</summary>
             <p class="muted" style="margin:8px 0 12px">Monitor mode, WPA2 crack, and airdecap-ng strip. Most reliable on Linux; Windows requires Npcap monitor mode + aircrack-ng and is adapter-dependent.</p>
             <div class="button-row">
               <button type="submit" name="action" value="monitor">Monitor Capture</button>
@@ -758,8 +1393,8 @@ def _dashboard_template(**values: object) -> str:
               <button type="submit" name="action" value="wifi">Full Wi-Fi Lab Flow</button>
             </div>
           </details>
-          <details style="margin-top:12px" open>
-            <summary style="cursor:pointer;color:var(--accent-2)">Raspberry Pi / Remote Appliance</summary>
+          <details open>
+            <summary>Raspberry Pi / Remote Appliance</summary>
             <p class="muted" style="margin:8px 0 12px">Use the Pi for capture-heavy work, then pull the PCAP back here for extraction and analysis. These actions use SSH keys and saved remote config, not stored passwords.</p>
             <div class="field-grid">
               <label>Remote Output Override
@@ -781,7 +1416,13 @@ def _dashboard_template(**values: object) -> str:
         </form>
       </div>
 
-      <div class="panel">
+      <div class="panel wifi-panel" id="wifi">
+        <h2>Auto Wi-Fi Targeting</h2>
+        <p class="muted">The dashboard scans for nearby APs and prefers the connected network, then the strongest secured target. Use Auto for plug-and-play, or switch to Manual in Saved Configuration when you want exact ESSID/BSSID/channel control.</p>
+        <div class="wifi-target-grid">{values.get('wifi_target_cards_html', '')}</div>
+      </div>
+
+      <div class="panel artifacts" id="artifacts">
         <h2>Artifacts</h2>
         <div class="artifact-grid">{values.get('artifact_cards', '')}</div>
         <div class="links">
@@ -793,7 +1434,7 @@ def _dashboard_template(**values: object) -> str:
         </div>
       </div>
 
-      <div class="panel">
+      <div class="panel selection" id="selection">
         <h2>Current Selection</h2>
         <p><strong>Detection stream:</strong> {val('detection_stream')}</p>
         <p class="muted">Class / score: {val('detection_class')} / {val('detection_score')}</p>
@@ -810,7 +1451,7 @@ def _dashboard_template(**values: object) -> str:
         <p class="muted">Next step: {val('selection_next_step')}</p>
       </div>
 
-      <div class="panel">
+      <div class="panel readiness" id="readiness">
         <h2>Replay + WPA Readiness</h2>
         <div class="status-row">
           <span class="pill {val('replay_status_class')}">{val('replay_status')}</span>
@@ -831,10 +1472,16 @@ def _dashboard_template(**values: object) -> str:
         {values.get('wpa_next_steps_html', '')}
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide config-panel" id="config">
         <h2>Saved Configuration</h2>
         <form method="post" action="/config">
           <div class="field-grid">
+            <label class="primary-choice">Wi-Fi Target
+              <select name="ap_target" data-ap-target-select>
+                {values.get('wifi_target_options', '')}
+              </select>
+              <span class="field-hint">Auto updates ESSID/BSSID/channel from discovery when possible. Manual keeps the override fields below exactly as typed.</span>
+            </label>
             <label>Interface
               <input list="interfaces" type="text" name="interface" value="{val('interface')}" />
               <datalist id="interfaces">
@@ -860,13 +1507,19 @@ def _dashboard_template(**values: object) -> str:
               <input type="text" name="target_macs" value="{val('target_macs')}" />
             </label>
             <label>AP ESSID
-              <input type="text" name="ap_essid" value="{val('ap_essid')}" />
+              <input list="wifi-essids" type="text" name="ap_essid" value="{val('ap_essid')}" data-ap-essid />
+              <datalist id="wifi-essids">
+                {values.get('wifi_essid_options', '')}
+              </datalist>
             </label>
             <label>AP BSSID
-              <input type="text" name="ap_bssid" value="{val('ap_bssid')}" placeholder="00:11:22:33:44:55" />
+              <input list="wifi-bssids" type="text" name="ap_bssid" value="{val('ap_bssid')}" placeholder="00:11:22:33:44:55" data-ap-bssid />
+              <datalist id="wifi-bssids">
+                {values.get('wifi_bssid_options', '')}
+              </datalist>
             </label>
             <label>AP Channel
-              <input type="number" name="ap_channel" value="{val('ap_channel')}" />
+              <input type="number" name="ap_channel" value="{val('ap_channel')}" data-ap-channel />
             </label>
             <label>Monitor Method
               <select name="monitor_method">
@@ -957,12 +1610,12 @@ def _dashboard_template(**values: object) -> str:
         </form>
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide" id="workflow">
         <h2>Workflow Capabilities</h2>
         <div class="status-stack">{values.get('workflow_cards_html', '')}</div>
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide" id="candidates">
         <h2>Top Candidate Streams</h2>
         <table>
           <thead>
@@ -972,7 +1625,7 @@ def _dashboard_template(**values: object) -> str:
         </table>
       </div>
 
-      <div class="panel">
+      <div class="panel corpus" id="corpus">
         <h2>Corpus Archive</h2>
         <p><strong>Archived streams:</strong> {val('corpus_entry_count')}</p>
         <p><strong>Reusable material:</strong> {val('corpus_material_count')}</p>
@@ -980,7 +1633,7 @@ def _dashboard_template(**values: object) -> str:
         <p class="muted">Analysis reused material: {val('corpus_reused')}</p>
       </div>
 
-      <div class="panel">
+      <div class="panel analysis" id="analysis">
         <h2>Detection + Analysis</h2>
         <p><strong>Average entropy:</strong> {val('average_entropy')}</p>
         <p><strong>Chi-squared:</strong> {val('chi_squared')}</p>
@@ -988,7 +1641,7 @@ def _dashboard_template(**values: object) -> str:
         <p class="muted">Recommendation: {val('recommendation')}</p>
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide" id="recent-corpus">
         <h2>Recent Corpus Entries</h2>
         <table>
           <thead>
@@ -998,7 +1651,7 @@ def _dashboard_template(**values: object) -> str:
         </table>
       </div>
 
-      <div class="panel wide">
+      <div class="panel wide" id="logs">
         <h2>Action Logs</h2>
         <div class="log-stack">{values.get('log_blocks', '')}</div>
       </div>
@@ -1023,6 +1676,27 @@ def _dashboard_template(**values: object) -> str:
           hidden.remove();
         }}
       }});
+    }}
+    const targetSelect = document.querySelector("[data-ap-target-select]");
+    if (targetSelect) {{
+      const essid = document.querySelector("[data-ap-essid]");
+      const bssid = document.querySelector("[data-ap-bssid]");
+      const channel = document.querySelector("[data-ap-channel]");
+      const fillTargetFields = (force) => {{
+        const option = targetSelect.selectedOptions && targetSelect.selectedOptions[0];
+        if (!option || targetSelect.value === "{MANUAL_TARGET_VALUE}") return;
+        const apply = (field, value) => {{
+          if (!field || !value) return;
+          if (force || !String(field.value || "").trim()) {{
+            field.value = value;
+          }}
+        }};
+        apply(essid, option.dataset.ssid || "");
+        apply(bssid, option.dataset.bssid || "");
+        apply(channel, option.dataset.channel || "");
+      }};
+      targetSelect.addEventListener("change", () => fillTargetFields(true));
+      fillTargetFields(false);
     }}
   </script>
 </body>

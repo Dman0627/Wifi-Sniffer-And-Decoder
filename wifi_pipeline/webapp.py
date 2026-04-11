@@ -31,6 +31,12 @@ from .remote import (
 )
 from .status_language import build_surface_status_bundle
 from .webapp_render import render_dashboard_html
+from .wifi_discovery import (
+    AUTO_TARGET_VALUE,
+    MANUAL_TARGET_VALUE,
+    discover_wifi_targets,
+    select_preferred_wifi_target,
+)
 
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 8765
@@ -136,6 +142,109 @@ def _form_value(payload: Dict[str, List[str]], key: str, default: str = "") -> s
 
 def _checked(payload: Dict[str, List[str]], key: str) -> bool:
     return key in payload
+
+
+def _wifi_target_mode(config: Dict[str, object]) -> str:
+    mode = str(config.get("wifi_target_mode") or "").strip().lower()
+    if mode in ("auto", "selected", "manual"):
+        return mode
+    if str(config.get("ap_essid") or "").strip() or str(config.get("ap_bssid") or "").strip():
+        return "selected"
+    return "auto"
+
+
+def _decode_wifi_target_value(value: str) -> Optional[Dict[str, object]]:
+    text = str(value or "").strip()
+    if not text or text in (AUTO_TARGET_VALUE, MANUAL_TARGET_VALUE):
+        return None
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return {
+        "ssid": str(raw.get("ssid") or "").strip(),
+        "bssid": str(raw.get("bssid") or "").strip(),
+        "channel": raw.get("channel") or "",
+        "signal": raw.get("signal") or "",
+        "signal_label": str(raw.get("signal_label") or "").strip(),
+        "security": str(raw.get("security") or "").strip(),
+        "source": str(raw.get("source") or "dashboard").strip(),
+        "connected": bool(raw.get("connected")),
+    }
+
+
+def _discover_wifi_targets_for_config(
+    config: Dict[str, object],
+    *,
+    force: bool = False,
+) -> List[Dict[str, object]]:
+    interface = str(config.get("interface") or config.get("remote_interface") or "").strip()
+    try:
+        return discover_wifi_targets(interface, timeout=1.2, ttl_seconds=20.0, force=force)
+    except Exception:
+        return []
+
+
+def _preferred_wifi_target(
+    config: Dict[str, object],
+    targets: List[Dict[str, object]],
+) -> Optional[Dict[str, object]]:
+    if _wifi_target_mode(config) == "auto":
+        return select_preferred_wifi_target(targets)
+    return select_preferred_wifi_target(
+        targets,
+        configured_essid=str(config.get("ap_essid") or ""),
+        configured_bssid=str(config.get("ap_bssid") or ""),
+    )
+
+
+def _apply_wifi_target(
+    config: Dict[str, object],
+    target: Optional[Dict[str, object]],
+    *,
+    mode: str,
+) -> bool:
+    if not target:
+        config["wifi_target_mode"] = mode
+        return False
+
+    changed = False
+    ssid = str(target.get("ssid") or "").strip()
+    bssid = str(target.get("bssid") or "").strip()
+    channel_text = str(target.get("channel") or "").strip()
+    if ssid and config.get("ap_essid") != ssid:
+        config["ap_essid"] = ssid
+        changed = True
+    if bssid and config.get("ap_bssid") != bssid:
+        config["ap_bssid"] = bssid
+        changed = True
+    if channel_text:
+        channel = _safe_int(channel_text, _config_int(config, "ap_channel", 6))
+        if config.get("ap_channel") != channel:
+            config["ap_channel"] = channel
+            changed = True
+
+    config["wifi_target_mode"] = mode
+    config["wifi_target_source"] = str(target.get("source") or "auto")
+    config["wifi_target_last_selected"] = _utc_stamp()
+    return changed
+
+
+def _resolve_auto_wifi_target(config: Dict[str, object], *, force: bool = False) -> Optional[Dict[str, object]]:
+    mode = _wifi_target_mode(config)
+    if mode == "manual":
+        return None
+    if mode == "selected" and (str(config.get("ap_essid") or "").strip() or str(config.get("ap_bssid") or "").strip()):
+        return None
+    targets = _discover_wifi_targets_for_config(config, force=force)
+    target = _preferred_wifi_target({**config, "wifi_target_mode": "auto"}, targets)
+    if target:
+        _apply_wifi_target(config, target, mode="auto")
+        return target
+    config["wifi_target_mode"] = mode
+    return None
 
 
 def _artifact_status(config: Dict[str, object]) -> List[Dict[str, object]]:
@@ -683,6 +792,8 @@ def _report_bundle(config: Dict[str, object]) -> Dict[str, object]:
     status_bundle = build_surface_status_bundle(config, detection, analysis)
     artifacts = _artifact_status(config)
     interfaces = list_interfaces()
+    wifi_targets = _discover_wifi_targets_for_config(config)
+    wifi_auto_target = _preferred_wifi_target(config, wifi_targets)
     return {
         "manifest": manifest,
         "detection": detection,
@@ -697,6 +808,9 @@ def _report_bundle(config: Dict[str, object]) -> Dict[str, object]:
         "corpus_entries": corpus.recent_entries(limit=8),
         "artifacts": artifacts,
         "interfaces": interfaces,
+        "wifi_targets": wifi_targets,
+        "wifi_auto_target": wifi_auto_target or {},
+        "wifi_target_mode": _wifi_target_mode(config),
         "operator_inventory": _operator_inventory(config, artifacts, interfaces, validation, remote_doctor, remote_discovery),
     }
 
@@ -769,7 +883,6 @@ class DashboardState:
         )
         config["output_dir"] = _form_value(form, "output_dir", str(config.get("output_dir") or "./pipeline_output"))
         config["target_macs"] = [item.strip() for item in macs_text.split(",") if item.strip()]
-        config["ap_essid"] = _form_value(form, "ap_essid", str(config.get("ap_essid") or ""))
         config["custom_header_size"] = _safe_int(
             _form_value(form, "custom_header_size", str(config.get("custom_header_size", 0))),
             _config_int(config, "custom_header_size", 0),
@@ -807,11 +920,27 @@ class DashboardState:
         config["monitor_method"] = _form_value(
             form, "monitor_method", str(config.get("monitor_method") or "airodump")
         ).lower()
+        config["ap_essid"] = _form_value(form, "ap_essid", str(config.get("ap_essid") or ""))
         config["ap_bssid"] = _form_value(form, "ap_bssid", str(config.get("ap_bssid") or ""))
         config["ap_channel"] = _safe_int(
             _form_value(form, "ap_channel", str(config.get("ap_channel", 6))),
             _config_int(config, "ap_channel", 6),
         )
+        target_value = _form_value(form, "ap_target", "")
+        if target_value == MANUAL_TARGET_VALUE:
+            config["wifi_target_mode"] = "manual"
+        elif target_value == AUTO_TARGET_VALUE:
+            config["wifi_target_mode"] = "auto"
+            targets = _discover_wifi_targets_for_config(config, force=True)
+            _apply_wifi_target(config, _preferred_wifi_target({**config, "wifi_target_mode": "auto"}, targets), mode="auto")
+        elif target_value:
+            selected_target = _decode_wifi_target_value(target_value)
+            if selected_target:
+                _apply_wifi_target(config, selected_target, mode="selected")
+            else:
+                config["wifi_target_mode"] = "manual"
+        elif "ap_target" not in form:
+            config["wifi_target_mode"] = "manual"
         config["wordlist_path"] = _form_value(
             form, "wordlist_path", str(config.get("wordlist_path") or "/usr/share/wordlists/rockyou.txt")
         )
@@ -885,6 +1014,8 @@ class DashboardState:
 
     def _execute_action(self, action: str, form: Dict[str, List[str]]) -> str:
         config = _load_dashboard_config(str(self.config_path))
+        if action in ("monitor", "crack", "wifi") and _resolve_auto_wifi_target(config):
+            _save_dashboard_config(config, str(self.config_path))
         pcap_path = _form_value(form, "pcap_path", "")
         decrypted_dir = _form_value(form, "decrypted_dir", "")
         strip_wifi = _checked(form, "strip_wifi") or _form_value(form, "strip_wifi_flag", "no").lower() == "yes"

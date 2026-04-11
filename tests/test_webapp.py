@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from wifi_pipeline.config import load_config, save_config
 from wifi_pipeline.webapp import ActionLog, DashboardHandler, DashboardState
 from wifi_pipeline.webapp_render import render_dashboard_html
+from wifi_pipeline.wifi_discovery import AUTO_TARGET_VALUE, MANUAL_TARGET_VALUE
 
 
 def _wait_for_server(host: str, port: int, *, timeout: float = 5.0) -> None:
@@ -167,6 +168,57 @@ def test_dashboard_update_config_recovers_from_invalid_saved_numeric_values(tmp_
     assert saved["remote_poll_interval"] == 8
 
 
+def test_dashboard_update_config_can_auto_select_discovered_wifi_target(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    save_config({"output_dir": str(tmp_path / "pipeline_output")}, str(config_path), quiet=True)
+    state = DashboardState(config_path=config_path)
+    targets = [
+        {
+            "ssid": "LabNet",
+            "bssid": "00:11:22:33:44:55",
+            "channel": 11,
+            "signal": 82,
+            "signal_label": "82%",
+            "security": "WPA2-Personal",
+            "source": "test",
+            "connected": True,
+        }
+    ]
+    monkeypatch.setattr("wifi_pipeline.webapp.discover_wifi_targets", lambda *args, **kwargs: targets)
+
+    message = state.update_config({"ap_target": [AUTO_TARGET_VALUE]})
+    saved = load_config(str(config_path), quiet=True)
+
+    assert message == "Saved configuration."
+    assert saved["wifi_target_mode"] == "auto"
+    assert saved["ap_essid"] == "LabNet"
+    assert saved["ap_bssid"] == "00:11:22:33:44:55"
+    assert saved["ap_channel"] == 11
+    assert saved["wifi_target_source"] == "test"
+
+
+def test_dashboard_update_config_manual_wifi_target_keeps_overrides(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    save_config({"output_dir": str(tmp_path / "pipeline_output")}, str(config_path), quiet=True)
+    state = DashboardState(config_path=config_path)
+    monkeypatch.setattr("wifi_pipeline.webapp.discover_wifi_targets", lambda *args, **kwargs: [])
+
+    state.update_config(
+        {
+            "ap_target": [MANUAL_TARGET_VALUE],
+            "ap_essid": ["HiddenLab"],
+            "ap_bssid": ["aa:bb:cc:dd:ee:ff"],
+            "ap_channel": ["3"],
+        }
+    )
+    saved = load_config(str(config_path), quiet=True)
+
+    assert saved["wifi_target_mode"] == "manual"
+    assert saved["ap_essid"] == "HiddenLab"
+    assert saved["ap_bssid"] == "aa:bb:cc:dd:ee:ff"
+    assert saved["ap_channel"] == 3
+
+
 def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> None:
     config_path = tmp_path / "lab.json"
     save_config({"output_dir": str(tmp_path / "pipeline_output")}, str(config_path), quiet=True)
@@ -228,6 +280,59 @@ def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> Non
     assert seen["detect_called"] is True
     assert seen["enrich_called"] is True
     assert seen["decrypted_dir"] == str(tmp_path / "decrypted")
+
+
+def test_dashboard_monitor_action_resolves_auto_wifi_target(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    save_config(
+        {
+            "output_dir": str(tmp_path / "pipeline_output"),
+            "wifi_target_mode": "auto",
+            "monitor_method": "airodump",
+        },
+        str(config_path),
+        quiet=True,
+    )
+    state = DashboardState(config_path=config_path)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.discover_wifi_targets",
+        lambda *args, **kwargs: [
+            {
+                "ssid": "LabNet",
+                "bssid": "00:11:22:33:44:55",
+                "channel": 11,
+                "signal": 82,
+                "signal_label": "82%",
+                "security": "WPA2-Personal",
+                "source": "test",
+                "connected": True,
+            }
+        ],
+    )
+
+    class FakeCapture:
+        def __init__(self, config):
+            seen["config"] = config
+
+        def run_monitor(self, method: str, interactive: bool = False):
+            seen["method"] = method
+            seen["interactive"] = interactive
+            return "monitor.cap"
+
+    monkeypatch.setattr("wifi_pipeline.webapp.Capture", FakeCapture)
+
+    message = state._execute_action("monitor", {})
+    saved = load_config(str(config_path), quiet=True)
+
+    assert message == "monitor.cap"
+    assert seen["config"]["ap_essid"] == "LabNet"
+    assert seen["config"]["ap_bssid"] == "00:11:22:33:44:55"
+    assert seen["config"]["ap_channel"] == 11
+    assert seen["method"] == "airodump"
+    assert seen["interactive"] is False
+    assert saved["ap_essid"] == "LabNet"
+    assert saved["wifi_target_mode"] == "auto"
 
 
 def test_dashboard_execute_remote_actions_and_records_reports(monkeypatch, tmp_path) -> None:
@@ -317,6 +422,7 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
                 "remote_poll_interval": 8,
                 "remote_install_mode": "auto",
                 "remote_install_profile": "appliance",
+                "wifi_target_mode": "auto",
             },
             "bundle": {
                 "detection": {"selected_candidate_stream": {"stream_id": "stream-1", "candidate_class": "jpeg", "score": 0.9}},
@@ -382,6 +488,29 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
                 "corpus_entries": [],
                 "corpus_status": {},
                 "interfaces": [],
+                "wifi_targets": [
+                    {
+                        "ssid": "LabNet <main>",
+                        "bssid": "00:11:22:33:44:55",
+                        "channel": 11,
+                        "signal": 82,
+                        "signal_label": "82%",
+                        "security": "WPA2-Personal",
+                        "source": "test",
+                        "connected": True,
+                    }
+                ],
+                "wifi_auto_target": {
+                    "ssid": "LabNet <main>",
+                    "bssid": "00:11:22:33:44:55",
+                    "channel": 11,
+                    "signal": 82,
+                    "signal_label": "82%",
+                    "security": "WPA2-Personal",
+                    "source": "test",
+                    "connected": True,
+                },
+                "wifi_target_mode": "auto",
                 "artifacts": [{"label": "Capture", "path": "C:/tmp/capture.pcapng", "exists": True}],
                 "operator_inventory": {
                     "headline": "1 ready tool, 0 blocked tools, 1 device.",
@@ -439,6 +568,9 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
     assert "Operator Console" in html
     assert "Tool Requirements" in html
     assert "Detected Devices" in html
+    assert "Auto Wi-Fi Targeting" in html
+    assert "LabNet &lt;main&gt;" in html
+    assert "Manual / keep override fields below" in html
     assert "Remote capture + pull" in html
     assert "david@raspi-sniffer" in html
     assert "Remote Doctor" in html
@@ -580,12 +712,28 @@ def test_dashboard_snapshot_includes_shared_status_bundle(monkeypatch, tmp_path)
             "wpa": {"status": "blocked", "summary": "WPA is blocked."},
         },
     )
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.discover_wifi_targets",
+        lambda *args, **kwargs: [
+            {
+                "ssid": "LabNet",
+                "bssid": "00:11:22:33:44:55",
+                "channel": 11,
+                "signal": 82,
+                "signal_label": "82%",
+                "security": "WPA2-Personal",
+                "source": "test",
+                "connected": True,
+            }
+        ],
+    )
 
     snapshot = state.snapshot()
 
     assert snapshot["bundle"]["status_bundle"]["machine_summary"]["headline"] == "Ubuntu standalone / privilege=root"
     assert snapshot["bundle"]["status_bundle"]["workflow"][0]["area"] == "local packet capture"
     assert snapshot["bundle"]["status_bundle"]["replay"]["status"] == "ready"
+    assert snapshot["bundle"]["wifi_auto_target"]["ssid"] == "LabNet"
     assert snapshot["bundle"]["operator_inventory"]["tools"]
     assert any(tool["label"] == "Remote doctor" for tool in snapshot["bundle"]["operator_inventory"]["tools"])
 
